@@ -823,7 +823,7 @@ function parseItemNames_(text) {
 
   return ((result && result.items) || [])
     .map(function (it) {
-      return { name: String(it.name || '').trim(), quantity: it.quantity };
+      return { name: String(it.name || '').trim(), category: it.category, quantity: it.quantity };
     })
     .filter(function (it) { return it.name; });
 }
