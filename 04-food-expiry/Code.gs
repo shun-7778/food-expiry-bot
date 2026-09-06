@@ -52,6 +52,22 @@ var HEADERS = ['登録日', '登録時刻', '食材名', '期限', '精度', '�
 
 var STATUS = { STOCK: '在庫', USED: '消費済', DISCARDED: '破棄', CANCELED: '取消' };
 
+// ---------------------------------------------------------------- 買い物リスト定義
+
+var SHOP_SHEET_NAME = '買い物リスト';
+
+var SHOP_COL = {
+  ADDED: 1,    // 追加日 (YYYY-MM-DD)
+  NAME: 2,     // 品名
+  STATUS: 3,   // 未購入 / 購入済 / 取消
+  UPDATED: 4   // 状態を最後に変えた日時
+};
+var SHOP_COL_COUNT = 4;
+
+var SHOP_HEADERS = ['追加日', '品名', '状態', '更新日時'];
+
+var SHOP_STATUS = { TODO: '未購入', DONE: '購入済', CANCELED: '取消' };
+
 // 通知のしきい値（日数）
 var NOTIFY_1M_DAYS = 30;
 var NOTIFY_1W_DAYS = 7;
@@ -152,6 +168,12 @@ var HELP_MESSAGE = [
   '毎週土曜の朝、期限が近いものをお知らせします。',
   '1品につき残り1か月と残り1週間の2回だけです。',
   '',
+  '■ 買い物リスト',
+  '「買い物リストに牛乳と卵を追加」',
+  '「牛乳買った」… リストから外す',
+  '「買い物リスト」… 一覧',
+  '「買い物リストを全部削除」… 空にする',
+  '',
   '■ コマンド',
   '在庫 … 在庫の一覧',
   '取消 … 直前の登録・消費を取り消す',
@@ -203,6 +225,29 @@ function handleText_(event, text) {
     return;
   }
 
+  // 買い物リストの操作は言い回しが定型なので、ほとんど API を使わずに処理できる
+  if (SHOP_LIST_CMD.test(text)) {
+    replyText_(event.replyToken, note + shopList_());
+    return;
+  }
+  if (SHOP_CLEAR_CMD.test(text)) {
+    replyText_(event.replyToken, note + shopClear_());
+    return;
+  }
+  var shopAdd = parseShopAddFast_(text);
+  if (shopAdd) {
+    replyText_(event.replyToken, note + shopAdd_(shopAdd));
+    return;
+  }
+  var bought = text.replace(/[。．!！]/g, '').trim().match(BOUGHT_VERB);
+  if (bought) {
+    var boughtNames = splitNames_(bought[1]);
+    if (boughtNames) {
+      replyText_(event.replyToken, note + shopBought_(boughtNames));
+      return;
+    }
+  }
+
   // 「牛乳使った」のような単純な言い方は API を使わずに処理する
   var fast = parseConsumeFast_(text);
   if (fast) {
@@ -222,6 +267,25 @@ function handleText_(event, text) {
     var intent = (result && result.intent) || 'unknown';
     var items = (result && result.items) || [];
 
+    var names = items.map(function (it) { return it.item_name; })
+      .filter(function (n) { return n; });
+
+    if (intent === 'shop_list') {
+      replyText_(event.replyToken, note + shopList_());
+      return;
+    }
+    if (intent === 'shop_clear') {
+      replyText_(event.replyToken, note + shopClear_());
+      return;
+    }
+    if (intent === 'shop_add' && names.length) {
+      replyText_(event.replyToken, note + shopAdd_(names));
+      return;
+    }
+    if (intent === 'shop_bought' && names.length) {
+      replyText_(event.replyToken, note + shopBought_(names));
+      return;
+    }
     if (intent === 'consume' || intent === 'discard') {
       replyText_(event.replyToken, note + consumeItems_(items, intent === 'discard'));
       return;
@@ -341,7 +405,9 @@ var TEXT_EXPIRY_SCHEMA = {
   properties: {
     intent: {
       type: 'string',
-      description: '"register"（期限の登録）| "consume"（食べた・使った）| "discard"（捨てた）| "unknown"'
+      description: '"register"（期限の登録）| "consume"（食べた・使った）| "discard"（捨てた）'
+        + '| "shop_add"（買い物リストに追加）| "shop_bought"（買ったのでリストから外す）'
+        + '| "shop_clear"（買い物リストを空に）| "shop_list"（買い物リストを見る）| "unknown"'
     },
     items: {
       type: 'array',
@@ -371,7 +437,17 @@ function buildTextPrompt_(text) {
     '- "register" … 食材の期限を登録しようとしている。例「豆乳は2027年2月21日」「納豆明日まで」',
     '- "consume"  … 食べた・使った・飲んだと報告している。例「牛乳使った」「ヨーグルト食べた」',
     '- "discard"  … 捨てた・処分したと報告している。例「豆腐捨てた」「傷んでたので処分した」',
-    '- "unknown"  … 上記のいずれでもない、または食材が読み取れない',
+    '- "shop_add"    … 買い物リストに入れたい。例「買い物リストに牛乳と卵を追加」「パン買っておきたい」',
+    '- "shop_bought" … 買ってきたのでリストから外す。例「牛乳買った」「卵は買えた」',
+    '- "shop_clear"  … 買い物リストを空にする。例「買い物リスト全部消して」',
+    '- "shop_list"   … 買い物リストを見たい。例「買い物リスト見せて」「何買うんだっけ」',
+    '- "unknown"     … 上記のいずれでもない、または食材が読み取れない',
+    '',
+    '在庫と買い物リストは別物です。次の違いに注意してください。',
+    '- 「牛乳使った」「牛乳食べた」… 手持ちを消費した → consume',
+    '- 「牛乳買った」          … 買ってきた → shop_bought（在庫への登録ではありません）',
+    '- 「牛乳は9月10日」        … 期限を伝えている → register',
+    'shop_add / shop_bought では品名だけを items に入れ、date は空文字にしてください。',
     '',
     'consume / discard の場合は、対象の食材名だけを items に入れてください。',
     'その場合 date は空文字、found は false のままで構いません（日付が述べられていればその日付を入れてください）。',
@@ -1187,6 +1263,33 @@ function isCancelWord_(text) {
 var USED_VERB = /^(.{1,14}?)(?:を|は)?(使った|使いました|つかった|食べた|たべた|食べました|飲んだ|のんだ|飲みました|消費した|開けた)$/;
 var DISCARD_VERB = /^(.{1,14}?)(?:を|は)?(捨てた|すてた|捨てました|処分した|廃棄した|だめにした)$/;
 
+var SHOP_LIST_CMD = /^(買い物リスト|買物リスト|買うもの|買い物)$/;
+var SHOP_CLEAR_CMD = /^買い?物リスト(を)?(全部|すべて|全て|ぜんぶ)?(削除|消して|消す|クリア|リセット|空に)(して|する)?$/;
+var BOUGHT_VERB = /^(.{1,14}?)(?:を|は)?(買った|買いました|購入した|買ってきた|買えた)$/;
+var SHOP_ADD_A = /^買い?物リスト(?:に|へ)(.+?)(?:を)?(?:追加|入れて|足して|加えて|メモ)(?:して|しといて|しておいて|とく)?$/;
+var SHOP_ADD_B = /^(.+?)(?:を)?買い?物リスト(?:に|へ)(?:追加|入れて|足して|加えて|メモ)(?:して|しといて|しておいて|とく)?$/;
+
+/** 「牛乳と卵」のような並びを品名の配列にする。日付が混ざるようなら null */
+function splitNames_(text) {
+  var parts = String(text).split(/[と、，,・\s]+/)
+    .map(function (s) { return s.replace(/^(も|の)/, '').trim(); })
+    .filter(function (s) { return s; });
+
+  if (!parts.length || parts.length > 10) return null;
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i].length > 20) return null;
+    if (/[0-9０-９]/.test(parts[i])) return null;  // 日付や数量が紛れている
+  }
+  return parts;
+}
+
+/** 「買い物リストに牛乳を追加」形式を Claude なしで解釈する */
+function parseShopAddFast_(text) {
+  var t = String(text).replace(/[。．!！]/g, '').trim();
+  var m = t.match(SHOP_ADD_A) || t.match(SHOP_ADD_B);
+  return m ? splitNames_(m[1]) : null;
+}
+
 /**
  * 「牛乳使った」のような単純な一文は、Claude を呼ばずにその場で解釈する。
  * 最頻の操作なので、ここを素通しできるとトークンが目に見えて減る。
@@ -1267,6 +1370,7 @@ function undoLast_() {
   if (!op || !op.rows || !op.rows.length) {
     return '取り消せる操作がありません。';
   }
+  if (op.sheet === 'shopping') return undoShopping_(op);
 
   var sh = sheet_();
   var stamp = nowStamp_();
@@ -1295,6 +1399,30 @@ function undoLast_() {
     : names[0];
 
   return head + '\n\n' + body;
+}
+
+/** 買い物リスト側の取り消し。追加は取消印、購入済は未購入に戻す */
+function undoShopping_(op) {
+  var sh = shopSheet_();
+  var stamp = nowStamp_();
+  var back = op.type === 'shop_add' ? SHOP_STATUS.CANCELED : SHOP_STATUS.TODO;
+  var names = [];
+
+  op.rows.forEach(function (row) {
+    if (row > sh.getLastRow()) return;
+    names.push(sh.getRange(row, SHOP_COL.NAME).getValue());
+    sh.getRange(row, SHOP_COL.STATUS).setValue(back);
+    sh.getRange(row, SHOP_COL.UPDATED).setValue(stamp);
+  });
+
+  PropertiesService.getScriptProperties().deleteProperty('LAST_OP');
+  if (!names.length) return '取り消せる操作がありません。';
+
+  var head = op.type === 'shop_add' ? '直前の追加を取り消しました'
+    : op.type === 'shop_clear' ? '買い物リストを元に戻しました'
+    : '買い物リストに戻しました';
+
+  return head + '（' + names.length + '件）\n' + names.join('、');
 }
 
 /** 在庫の一覧を返す */
@@ -1411,6 +1539,174 @@ function setupWeeklyTrigger() {
     .create();
 
   console.log('毎週土曜 8時台に notifyWeekly を実行するトリガーを設定しました');
+}
+
+// ---------------------------------------------------------------- 買い物リスト
+
+/**
+ * 買い物リストのシートを返す。無ければ作り、ヘッダーが無ければ入れる。
+ * （手動で空のシートだけ作ってある状態でもそのまま使えるようにしている）
+ */
+function shopSheet_() {
+  var id = prop_('SPREADSHEET_ID', false);
+  if (!id) {
+    throw new Error('記録先が未設定です。GASエディタで setupSpreadsheet を1回実行してください。');
+  }
+
+  var ss = SpreadsheetApp.openById(id);
+  var sh = ss.getSheetByName(SHOP_SHEET_NAME) || ss.insertSheet(SHOP_SHEET_NAME);
+
+  if (sh.getLastRow() === 0) {
+    sh.getRange(1, 1, 1, SHOP_COL_COUNT).setValues([SHOP_HEADERS]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+/** 未購入の行を {row, name} で返す */
+function shopTodoRows_(sh) {
+  var last = sh.getLastRow();
+  if (last < 2) return [];
+
+  var data = sh.getRange(2, 1, last - 1, SHOP_COL_COUNT).getValues();
+  var out = [];
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][SHOP_COL.STATUS - 1] !== SHOP_STATUS.TODO) continue;
+    out.push({ row: i + 2, name: data[i][SHOP_COL.NAME - 1] });
+  }
+  return out;
+}
+
+/** 買い物リストに品名を追加する。すでに未購入で載っているものは足さない */
+function shopAdd_(names) {
+  var clean = names
+    .map(function (n) { return String(n || '').trim(); })
+    .filter(function (n) { return n; });
+  if (!clean.length) return '追加するものを読み取れませんでした。';
+
+  var sh = shopSheet_();
+  var todo = shopTodoRows_(sh);
+  var known = {};
+  todo.forEach(function (t) { known[normalizeName_(t.name)] = t.name; });
+
+  var added = [];
+  var dup = [];
+  clean.forEach(function (n) {
+    var key = normalizeName_(n);
+    if (known[key]) { dup.push(known[key]); return; }
+    known[key] = n;   // 同じ発話の中での重複も防ぐ
+    added.push(n);
+  });
+
+  var lines = [];
+  if (added.length) {
+    var startRow = sh.getLastRow() + 1;
+    var stamp = nowStamp_();
+    var values = added.map(function (n) {
+      var row = new Array(SHOP_COL_COUNT).fill('');
+      row[SHOP_COL.ADDED - 1] = todayStamp_();
+      row[SHOP_COL.NAME - 1] = n;
+      row[SHOP_COL.STATUS - 1] = SHOP_STATUS.TODO;
+      row[SHOP_COL.UPDATED - 1] = stamp;
+      return row;
+    });
+    sh.getRange(startRow, 1, values.length, SHOP_COL_COUNT).setValues(values);
+
+    setLastOp_({
+      type: 'shop_add',
+      sheet: 'shopping',
+      rows: values.map(function (_, i) { return startRow + i; })
+    });
+
+    lines.push('買い物リストに追加しました（' + added.length + '件）');
+    lines.push('');
+    added.forEach(function (n, i) { lines.push((i + 1) + '. ' + n); });
+  }
+
+  if (dup.length) {
+    if (lines.length) lines.push('');
+    lines.push('※ すでにリストにあります: ' + dup.join('、'));
+  }
+  return lines.join('\n');
+}
+
+/** 買ったものをリストから外す（購入済にする） */
+function shopBought_(names) {
+  var sh = shopSheet_();
+  var todo = shopTodoRows_(sh);
+  if (!todo.length) return '買い物リストは空です。';
+
+  var stamp = nowStamp_();
+  var done = [];
+  var missed = [];
+  var changed = [];
+
+  names.forEach(function (n) {
+    var key = normalizeName_(n);
+    if (!key) { missed.push(n || '(名称不明)'); return; }
+
+    var hit = null;
+    for (var i = 0; i < todo.length; i++) {
+      if (changed.indexOf(todo[i].row) >= 0) continue;
+      var name = normalizeName_(todo[i].name);
+      if (name.indexOf(key) >= 0 || key.indexOf(name) >= 0) { hit = todo[i]; break; }
+    }
+
+    if (!hit) { missed.push(n); return; }
+
+    sh.getRange(hit.row, SHOP_COL.STATUS).setValue(SHOP_STATUS.DONE);
+    sh.getRange(hit.row, SHOP_COL.UPDATED).setValue(stamp);
+    changed.push(hit.row);
+    done.push(hit.name);
+  });
+
+  if (changed.length) {
+    setLastOp_({ type: 'shop_bought', sheet: 'shopping', rows: changed });
+  }
+
+  var lines = [];
+  if (done.length) {
+    lines.push('買い物リストから外しました（' + done.length + '件）');
+    lines.push('');
+    done.forEach(function (n, i) { lines.push((i + 1) + '. ' + n); });
+  }
+  if (missed.length) {
+    if (lines.length) lines.push('');
+    lines.push('※ リストに見つかりませんでした: ' + missed.join('、'));
+  }
+  return lines.length ? lines.join('\n') : '対象を読み取れませんでした。';
+}
+
+/** 未購入をすべて購入済にする。行は消さないので「取消」で戻せる */
+function shopClear_() {
+  var sh = shopSheet_();
+  var todo = shopTodoRows_(sh);
+  if (!todo.length) return '買い物リストはすでに空です。';
+
+  var stamp = nowStamp_();
+  todo.forEach(function (t) {
+    sh.getRange(t.row, SHOP_COL.STATUS).setValue(SHOP_STATUS.DONE);
+    sh.getRange(t.row, SHOP_COL.UPDATED).setValue(stamp);
+  });
+
+  setLastOp_({
+    type: 'shop_clear',
+    sheet: 'shopping',
+    rows: todo.map(function (t) { return t.row; })
+  });
+
+  return '買い物リストを空にしました（' + todo.length + '件）\n'
+    + todo.map(function (t) { return t.name; }).join('、')
+    + '\n\n戻す場合は「取消」と送ってください。';
+}
+
+/** 未購入の一覧 */
+function shopList_() {
+  var todo = shopTodoRows_(shopSheet_());
+  if (!todo.length) return '買い物リストは空です。';
+
+  return '買い物リスト ' + todo.length + '件\n\n'
+    + todo.map(function (t, i) { return (i + 1) + '. ' + t.name; }).join('\n');
 }
 
 // ---------------------------------------------------------------- 動作確認用
