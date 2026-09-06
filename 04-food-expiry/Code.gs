@@ -252,8 +252,8 @@ function handleText_(event, text) {
   var fast = parseConsumeFast_(text);
   if (fast) {
     try {
-      replyText_(event.replyToken,
-        note + consumeItems_([{ item_name: fast.item_name }], fast.disposed));
+      replyText_(event.replyToken, prefixReply_(note,
+        consumeItems_([{ item_name: fast.item_name }], fast.disposed)));
       return;
     } catch (err) {
       console.error('消費処理に失敗: ' + err.stack);
@@ -287,11 +287,12 @@ function handleText_(event, text) {
       return;
     }
     if (intent === 'consume' || intent === 'discard') {
-      replyText_(event.replyToken, note + consumeItems_(items, intent === 'discard'));
+      replyText_(event.replyToken,
+        prefixReply_(note, consumeItems_(items, intent === 'discard')));
       return;
     }
     if (intent === 'register' && items.length) {
-      replyText_(event.replyToken, note + registerItems_(items, 'テキスト'));
+      replyText_(event.replyToken, prefixReply_(note, registerItems_(items, 'テキスト')));
       return;
     }
     replyText_(event.replyToken, note + TEXT_EMPTY_MESSAGE);
@@ -333,16 +334,53 @@ function fetchLineImage_(messageId) {
   return { base64: Utilities.base64Encode(bytes), mimeType: mimeType };
 }
 
-/** 返信トークンでテキストを返す */
-function replyText_(replyToken, text) {
+// Quick Reply のボタン数の上限（LINE 仕様）
+var QUICK_REPLY_MAX = 13;
+
+/**
+ * 返信の中身。文字列だけの返信と、ボタン付きの返信を同じ形で扱う。
+ * ボタンを押すと label と同じテキストが送られてくるので、
+ * 受け側（parseChoiceList_ など）は手入力と区別せずそのまま処理できる。
+ */
+function asReply_(reply) {
+  return typeof reply === 'string' ? { text: reply, labels: null } : reply;
+}
+
+/** 返信の先頭に断り書きを足す。ボタンはそのまま保つ */
+function prefixReply_(note, reply) {
+  var r = asReply_(reply);
+  return note ? { text: note + r.text, labels: r.labels } : r;
+}
+
+function buildQuickReply_(labels) {
+  return {
+    items: labels.slice(0, QUICK_REPLY_MAX).map(function (label) {
+      var s = String(label);
+      return {
+        type: 'action',
+        action: { type: 'message', label: s.substring(0, 20), text: s }
+      };
+    })
+  };
+}
+
+/** 返信トークンで返す。reply は文字列または {text, labels} */
+function replyText_(replyToken, reply) {
   if (!replyToken) return;
+
+  var r = asReply_(reply);
+  var message = { type: 'text', text: r.text.substring(0, 4900) };
+  if (r.labels && r.labels.length) {
+    message.quickReply = buildQuickReply_(r.labels);
+  }
+
   var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', {
     method: 'post',
     contentType: 'application/json',
     headers: { Authorization: 'Bearer ' + prop_('LINE_CHANNEL_ACCESS_TOKEN', true) },
     payload: JSON.stringify({
       replyToken: replyToken,
-      messages: [{ type: 'text', text: text.substring(0, 4900) }]
+      messages: [message]
     }),
     muteHttpExceptions: true
   });
@@ -858,7 +896,7 @@ function finishRegister_(sh, session) {
     savePending_(session);
     var head = buildRegisterReport_(session, false);
     var q = formatDuplicateQuestion_(session.confirm);
-    return head ? head + '\n\n' + q : q;
+    return head ? { text: head + '\n\n' + q.text, labels: q.labels } : q;
   }
 
   clearPending_();
@@ -892,7 +930,10 @@ function formatDuplicateQuestion_(confirm) {
   lines.push('2. 登録しない（二重登録だった）');
   lines.push('');
   lines.push('番号でも「登録する」「登録しない」でも答えられます。');
-  return lines.join('\n');
+  return {
+    text: lines.join('\n'),
+    labels: ['登録する', '登録しない', 'やめる']
+  };
 }
 
 /** 重複確認への回答を処理する */
@@ -905,7 +946,8 @@ function resolveRegister_(n) {
 
   if (n !== 1 && n !== 2) {
     savePending_(session);
-    return '1 か 2 で答えてください。\n\n' + formatDuplicateQuestion_(session.confirm);
+    var q = formatDuplicateQuestion_(session.confirm);
+    return { text: '1 か 2 で答えてください。\n\n' + q.text, labels: q.labels };
   }
 
   var sh = sheet_();
@@ -1140,7 +1182,18 @@ function formatQuestion_(q, action) {
 
   lines.push('');
   lines.push('（すべてなら「全部」、やめる場合は「やめる」）');
-  return lines.join('\n');
+
+  // 1件だけ選ぶ場合はボタンで済ませられる。
+  // 複数選ぶ場合はタップでは表せない（1つ押した時点で確定してしまう）ので、
+  // 番号のボタンは出さず、カンマ区切りの手入力に委ねる。
+  var labels = [];
+  if (need === 1) {
+    var max = Math.min(q.choices.length, QUICK_REPLY_MAX - 2);
+    for (var i = 0; i < max; i++) labels.push(String(i + 1));
+  }
+  labels.push('全部', 'やめる');
+
+  return { text: lines.join('\n'), labels: labels };
 }
 
 /** 済んだ分の報告文を作る。何もなければ空文字 */
@@ -1169,7 +1222,7 @@ function finishSession_(sh, session) {
   if (question) {
     savePending_(session);
     var head = buildSessionReport_(session, false);
-    return head ? head + '\n\n' + question : question;
+    return head ? { text: head + '\n\n' + question.text, labels: question.labels } : question;
   }
 
   clearPending_();
@@ -1338,8 +1391,11 @@ function resolvePending_(selection) {
     var bad = selection.filter(function (n) { return n < 1 || n > q.choices.length; });
     if (bad.length) {
       savePending_(session);
-      return '1〜' + q.choices.length + ' の番号で答えてください。\n\n'
-        + formatQuestion_(q, session.action);
+      var question = formatQuestion_(q, session.action);
+      return {
+        text: '1〜' + q.choices.length + ' の番号で答えてください。\n\n' + question.text,
+        labels: question.labels
+      };
     }
     picks = selection.map(function (n) { return q.choices[n - 1]; });
   }
