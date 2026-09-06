@@ -9,19 +9,19 @@
  */
 
 /**
- * 使用するモデル。安い順に haiku < sonnet < opus。
- *   'claude-opus-5'    約3円/枚   精度最優先
- *   'claude-sonnet-5'  約1.1円/枚 バランス型
- *   'claude-haiku-4-5' 約0.6円/枚 最安（effort 非対応のため自動で除外される）
- */
-/**
  * タスクごとにモデルを分ける。
- *   写真の読み取りはかすれた印字を読む難しい仕事なので精度優先。
- *   テキストの解析と在庫の突き合わせは易しいので安いモデルで足りる。
- * 精度に不満が出たら MODEL_TEXT を 'claude-sonnet-5' や MODEL_VISION と同じものに上げる。
+ *   写真の読み取り … 印字を読むぶん難度は高いが、Sonnet で足りる想定
+ *   テキストの解析・在庫の突き合わせ … 易しいので最安の Haiku
+ *
+ * 単価（入力/出力 per MTok）と画像1枚あたりの目安:
+ *   'claude-opus-5'    $5 / $25   約2.7円/枚  精度最優先
+ *   'claude-sonnet-5'  $2 / $10   約1.1円/枚  バランス型
+ *   'claude-haiku-4-5' $1 / $5    約0.6円/枚  最安（effort 非対応。自動で除外される）
+ *
+ * 読み取りを外すようなら MODEL_VISION を 'claude-opus-5' に戻す。
  */
-var MODEL_VISION = 'claude-opus-5';    // 約$5/$10 per MTok
-var MODEL_TEXT = 'claude-haiku-4-5';   // 約$1/$5 per MTok
+var MODEL_VISION = 'claude-sonnet-5';
+var MODEL_TEXT = 'claude-haiku-4-5';
 
 var ANTHROPIC_MODEL = MODEL_VISION;    // testConfig の疎通確認用
 var ANTHROPIC_VERSION = '2023-06-01';
