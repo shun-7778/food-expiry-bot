@@ -146,8 +146,8 @@ var HELP_MESSAGE = [
   '■ 使ったとき',
   '「牛乳使った」「ヨーグルト食べた」',
   '「豆腐捨てた」（破棄として記録）',
-  '同じ食材が複数あるときは、期限つきの候補を',
-  '返すので番号で答えてください。',
+  '「片栗粉2つ捨てた」「牛乳全部使った」もまとめて可',
+  '迷う候補があるときだけ番号で聞きます（例: 1,3）',
   '',
   '■ 通知',
   '毎週土曜の朝、期限が近いものをお知らせします。',
@@ -180,7 +180,7 @@ function handleText_(event, text) {
       replyText_(event.replyToken, cancelPending_());
       return;
     }
-    var answer = pending.kind === 'register' ? parseRegisterAnswer_(text) : parseChoice_(text);
+    var answer = pending.kind === 'register' ? parseRegisterAnswer_(text) : parseChoiceList_(text);
     if (answer !== null) {
       replyText_(event.replyToken, pending.kind === 'register'
         ? resolveRegister_(answer)
@@ -376,6 +376,9 @@ function buildTextPrompt_(text) {
     '',
     'consume / discard の場合は、対象の食材名だけを items に入れてください。',
     'その場合 date は空文字、found は false のままで構いません（日付が述べられていればその日付を入れてください）。',
+    '個数が述べられていれば quantity に入れてください。例:「片栗粉2つ捨てた」→ quantity=2。',
+    '「全部」「すべて」と言われた場合は quantity=99 にしてください（該当する在庫すべての意味）。',
+    'なお 99 を使うのは consume / discard のときだけです。register では実際に買った個数だけを入れてください。',
     '',
     'register の場合は、以下に従って期限日を特定してください。',
     '',
@@ -947,12 +950,8 @@ function consumeItems_(items, disposed) {
     }
 
     candidates.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
-    if (candidates.length === 1) {
-      markRow_(sh, candidates[0], session);
-    } else {
-      // 勝手に選ばず、どれかを尋ねる
-      session.queue.push({ said: it.item_name, choices: candidates });
-    }
+    // 何件処理するかは advanceQueue_ が判断する（自動で片付くならそこで片付く）
+    session.queue.push({ said: it.item_name, choices: candidates, need: consumeQty_(it.quantity) });
   });
 
   // 第2段階: 文字列で当たらなかったものだけ、意味でClaudeに照合させる
@@ -995,41 +994,69 @@ function markRow_(sh, choice, session) {
   session.done.push(withDate_(choice.name, choice.date, choice.label));
 }
 
+/** 消費・破棄の個数。「全部」を大きな数で表すため上限は 99 */
+function consumeQty_(q) {
+  var n = parseInt(q, 10);
+  if (!n || n < 1) return 1;
+  return Math.min(n, 99);
+}
+
+/** 名前も期限も同じなら、どちらを消しても結果は変わらない */
+function allSameItem_(list) {
+  for (var i = 1; i < list.length; i++) {
+    if (normalizeName_(list[i].name) !== normalizeName_(list[0].name)) return false;
+    if (list[i].date !== list[0].date) return false;
+  }
+  return true;
+}
+
 /**
  * 候補が複数ある質問を先頭から処理する。
- * すでに消した行を候補から除いた結果、残り1件になれば自動で確定し、
- * 0件になればその食材は見つからなかった扱いにする。
- * まだ選んでもらう必要があれば質問文を返す。
+ * 尋ねる必要がないものはここで片付ける:
+ *   - すでに消した行を除いて0件 … 見つからなかった扱い
+ *   - 候補が必要数以下 … 全部そのまま処理する（「2つ捨てた」で在庫が2件など）
+ *   - 名前も期限も同じものが並ぶだけ … どれを選んでも同じなので先頭から必要数だけ処理する
+ * それ以外は質問文を返す。
  */
 function advanceQueue_(sh, session) {
   while (session.queue.length) {
     var q = session.queue[0];
+    var need = q.need || 1;
     q.choices = q.choices.filter(function (c) { return session.changed.indexOf(c.row) < 0; });
 
     if (!q.choices.length) {
       session.missed.push(q.said);
       session.queue.shift();
-    } else if (q.choices.length === 1) {
-      markRow_(sh, q.choices[0], session);
-      session.queue.shift();
-    } else {
-      return formatQuestion_(q, session.action);
+      continue;
     }
+
+    if (q.choices.length <= need || allSameItem_(q.choices)) {
+      q.choices.slice(0, need).forEach(function (c) { markRow_(sh, c, session); });
+      session.queue.shift();
+      continue;
+    }
+
+    return formatQuestion_(q, session.action);
   }
   return null;
 }
 
 function formatQuestion_(q, action) {
-  var lines = [
-    '「' + q.said + '」に該当する在庫が ' + q.choices.length + '件あります。',
-    (action === 'discard' ? '破棄' : '消費') + 'したものを番号で答えてください。',
-    ''
-  ];
+  var need = q.need || 1;
+  var verb = action === 'discard' ? '破棄' : '消費';
+
+  var lines = ['「' + q.said + '」に該当する在庫が ' + q.choices.length + '件あります。'];
+  lines.push(need > 1
+    ? verb + 'した ' + need + '件を、番号をカンマ区切りで答えてください。（例: 1,3）'
+    : verb + 'したものを番号で答えてください。');
+  lines.push('');
+
   q.choices.forEach(function (c, i) {
     lines.push((i + 1) + '. ' + withDate_(c.name, c.date, c.label));
   });
+
   lines.push('');
-  lines.push('（やめる場合は「やめる」）');
+  lines.push('（すべてなら「全部」、やめる場合は「やめる」）');
   return lines.join('\n');
 }
 
@@ -1108,6 +1135,31 @@ function parseChoice_(text) {
   return m ? parseInt(m[1], 10) : null;
 }
 
+/**
+ * 消費・破棄の候補選択への回答。
+ * 「1」「1,3」「1 3」「全部」に対応する。番号として読めなければ null。
+ */
+function parseChoiceList_(text) {
+  var t = String(text)
+    .replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
+    .replace(/[、，,。．・とや]/g, ' ')
+    .trim();
+
+  if (/^(全部|すべて|全て|ぜんぶ|ぜんぶです)$/.test(t.replace(/\s/g, ''))) return 'all';
+
+  var parts = t.split(/\s+/).filter(function (s) { return s; });
+  if (!parts.length) return null;
+
+  var nums = [];
+  for (var i = 0; i < parts.length; i++) {
+    var m = parts[i].match(/^(\d{1,2})(番|番目|つ目|個目|です)?$/);
+    if (!m) return null;
+    var n = parseInt(m[1], 10);
+    if (nums.indexOf(n) < 0) nums.push(n);
+  }
+  return nums;
+}
+
 var YES_PATTERN = /^(1|登録する|登録|する|はい|うん|ok|おっけー|オッケー|了解|買った|2つ目|2つ目を買った|追加|追加する|そう|yes|y)$/;
 var NO_PATTERN = /^(2|登録しない|しない|いらない|不要|いいえ|いや|違う|ちがう|間違い|間違え|重複|だぶり|no|n)$/;
 
@@ -1156,8 +1208,11 @@ function parseConsumeFast_(text) {
   return { disposed: disposed, item_name: name };
 }
 
-/** 番号で選ばれた候補を確定する */
-function resolvePending_(n) {
+/**
+ * 選ばれた候補を確定する。
+ * selection は番号の配列、または全件を表す 'all'。
+ */
+function resolvePending_(selection) {
   var session = getPending_();
   if (!session || !session.queue.length) {
     clearPending_();
@@ -1165,13 +1220,22 @@ function resolvePending_(n) {
   }
 
   var q = session.queue[0];
-  if (n < 1 || n > q.choices.length) {
-    savePending_(session);
-    return '1〜' + q.choices.length + ' の番号で答えてください。\n\n' + formatQuestion_(q, session.action);
+  var picks;
+
+  if (selection === 'all') {
+    picks = q.choices.slice();
+  } else {
+    var bad = selection.filter(function (n) { return n < 1 || n > q.choices.length; });
+    if (bad.length) {
+      savePending_(session);
+      return '1〜' + q.choices.length + ' の番号で答えてください。\n\n'
+        + formatQuestion_(q, session.action);
+    }
+    picks = selection.map(function (n) { return q.choices[n - 1]; });
   }
 
   var sh = sheet_();
-  markRow_(sh, q.choices[n - 1], session);
+  picks.forEach(function (c) { markRow_(sh, c, session); });
   session.queue.shift();
   return finishSession_(sh, session);
 }
