@@ -62,19 +62,19 @@ def icon_check(cx, cy, s, fg, bg):
            joint="curve")
 
 
-def icon_trash(cx, cy, s, fg, bg):
-    """ゴミ箱＝破棄済"""
-    w, h = s * 0.82, s * 0.9
-    x0, y0 = cx - w / 2, cy - h / 2 + s * 0.1
-    d.rounded_rectangle([x0 - s * 0.12, y0 - s * 0.16, x0 + w + s * 0.12, y0 - s * 0.04],
-                        radius=s * 0.06, fill=fg)
-    d.rounded_rectangle([cx - s * 0.16, y0 - s * 0.28, cx + s * 0.16, y0 - s * 0.14],
-                        radius=s * 0.05, fill=fg)
-    d.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=s * 0.09, fill=fg)
-    for fx in (0.3, 0.5, 0.7):
-        d.rounded_rectangle([x0 + w * fx - s * 0.035, y0 + h * 0.18,
-                             x0 + w * fx + s * 0.035, y0 + h * 0.82],
-                            radius=s * 0.035, fill=bg)
+def icon_fridge(cx, cy, s, fg, bg):
+    """冷蔵庫＝在庫一覧。既存 b-fridge.png と同じ発想"""
+    w, h = s * 0.76, s * 1.04
+    x0, y0 = cx - w / 2, cy - h / 2
+    d.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=s * 0.10, fill=fg)
+    # 上下の扉を分ける線
+    dy = y0 + h * 0.36
+    d.rectangle([x0, dy - s * 0.028, x0 + w, dy + s * 0.028], fill=bg)
+    # 取っ手
+    for ty in (dy - h * 0.20, dy + h * 0.10):
+        d.rounded_rectangle([x0 + w * 0.72 - s * 0.032, ty,
+                             x0 + w * 0.72 + s * 0.032, ty + h * 0.16],
+                            radius=s * 0.032, fill=bg)
 
 
 def icon_list(cx, cy, s, fg, bg, mark=None):
@@ -136,8 +136,9 @@ CELLS = [
     # (col, row, 見出し, 2行目, アイコン, 背景, 前景)
     (0, 0, "期限登録", None,       icon_calendar, GREEN, GREEN_DARK),
     (1, 0, "使用済",   None,       icon_check,    GREEN, GREEN_DARK),
-    (2, 0, "破棄済",   None,       icon_trash,    GREEN, GREEN_DARK),
-    # 取消は在庫にも買い物リストにも効くので、どちらの色にも寄せない
+    (2, 0, "在庫",     None,       icon_fridge,   GREEN, GREEN_DARK),
+    # 取消は在庫にも買い物リストにも効くので、どちらの色にも寄せない。
+    # 真下の「全削除」を押し間違えたときに、指を動かさず戻せる位置でもある
     (3, 0, "取消",     None,       icon_undo,     GRAY,  GRAY_DARK),
     (0, 1, "買い物リスト", "追加",  lambda *a: icon_list(*a, mark="+"), BLUE, BLUE_DARK),
     (1, 1, "買い物リスト", "削除",  lambda *a: icon_list(*a, mark="-"), BLUE, BLUE_DARK),
