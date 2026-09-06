@@ -1171,17 +1171,17 @@ function resolveRegister_(n) {
   return finishRegister_(sh, session);
 }
 
-var STOCK_MATCH_SCHEMA = {
+var LIST_MATCH_SCHEMA = {
   type: 'object',
   properties: {
     matches: {
       type: 'array',
-      description: 'ユーザーが言った食材名ごとに1要素',
+      description: 'ユーザーが言った品名ごとに1要素',
       items: {
         type: 'object',
         properties: {
-          said: { type: 'string', description: 'ユーザーが言った食材名（与えられた文字列をそのまま返す）' },
-          row: { type: 'number', description: '該当する在庫の行番号。該当なしは 0' },
+          said: { type: 'string', description: 'ユーザーが言った品名（与えられた文字列をそのまま返す）' },
+          row: { type: 'number', description: '該当する行番号。該当なしは 0' },
           reason: { type: 'string', description: 'そう判断した理由を日本語で簡潔に' }
         },
         required: ['said', 'row', 'reason'],
@@ -1194,32 +1194,66 @@ var STOCK_MATCH_SCHEMA = {
 };
 
 /**
- * 文字列一致で見つからなかった食材を、在庫リストと意味で突き合わせる。
- * 商品名は写真から読み取った正式名称になるため、
- * 「コーヒー」→「ネスカフェ ゴールドブレンド」のような言い換えを解決する。
+ * 文字列一致で見つからなかった品名を、リストと意味で突き合わせる。
+ * 在庫は写真から読み取った正式名称になるため「コーヒー」→
+ * 「ネスカフェ ゴールドブレンド」のような言い換えを、
+ * 買い物リストは「とうふ」→「豆腐」のような表記ゆれを解決する。
+ *
+ * rows は {row, name} の配列。在庫の場合は date も持たせる。
  */
-function matchStockByClaude_(names, stock) {
-  var prompt = [
-    'ユーザーが「使った」「捨てた」と言った食材が、在庫リストのどれを指すか特定してください。',
-    '',
-    '在庫リスト（行番号: 商品名（期限））',
-    stock.map(function (s) { return s.row + ': ' + s.name + '（' + s.date + '）'; }).join('\n'),
-    '',
-    'ユーザーが言った食材:',
-    names.map(function (n, i) { return (i + 1) + '. ' + n; }).join('\n'),
-    '',
-    '判断の指針:',
-    '- 商品名は写真から読み取った正式名称です。ユーザーは略称・一般名・カテゴリ名で呼びます。',
-    '  例:「ヨーグルト」→「ダノンビオ」、「コーヒー」→「ネスカフェ ゴールドブレンド」',
-    '- 表記ゆれは同一とみなしてください。例: 卵/たまご/タマゴ、豆腐/とうふ',
-    '- 同じ食材が複数該当する場合は、期限が最も近い行を選んでください。',
-    '- 該当する在庫がなければ row を 0 にしてください。似ているだけの別の食材で代用しないこと。',
-    '  例: ユーザーが「牛乳」と言い、在庫に「豆乳」しかない場合は 0 です。',
-    '- 同じ行を複数の食材に割り当てないでください。'
-  ].join('\n');
+function matchListByClaude_(names, rows, kind) {
+  var isStock = kind === 'stock';
+  var lines = [];
 
-  var result = callClaude_([{ type: 'text', text: prompt }], STOCK_MATCH_SCHEMA, MODEL_TEXT);
+  lines.push(isStock
+    ? 'ユーザーが「使った」「捨てた」と言った食材が、在庫リストのどれを指すか特定してください。'
+    : 'ユーザーが「買った」と言った品物が、買い物リストのどれを指すか特定してください。');
+  lines.push('');
+  lines.push(isStock ? '在庫リスト（行番号: 商品名（期限））' : '買い物リスト（行番号: 品名）');
+  lines.push(rows.map(function (s) {
+    return s.row + ': ' + s.name + (isStock ? '（' + s.date + '）' : '');
+  }).join('\n'));
+  lines.push('');
+  lines.push('ユーザーが言った品名:');
+  lines.push(names.map(function (n, i) { return (i + 1) + '. ' + n; }).join('\n'));
+  lines.push('');
+  lines.push('判断の指針:');
+
+  if (isStock) {
+    lines.push('- 商品名は写真から読み取った正式名称です。ユーザーは略称・一般名・カテゴリ名で呼びます。');
+    lines.push('  例:「ヨーグルト」→「ダノンビオ」、「コーヒー」→「ネスカフェ ゴールドブレンド」');
+  } else {
+    lines.push('- リストの品名はユーザー自身が入れたものです。略称や一般名で呼ばれることがあります。');
+    lines.push('  例:「ヨーグルト」→「ブルガリアヨーグルト」');
+  }
+
+  lines.push('- 表記ゆれは同一とみなしてください。例: 卵/たまご/タマゴ、豆腐/とうふ、人参/にんじん');
+  if (isStock) {
+    lines.push('- 同じ食材が複数該当する場合は、期限が最も近い行を選んでください。');
+  }
+  lines.push('- 該当がなければ row を 0 にしてください。似ているだけの別のもので代用しないこと。');
+  lines.push('  例: ユーザーが「牛乳」と言い、リストに「豆乳」しかない場合は 0 です。');
+  lines.push('- 同じ行を複数の品名に割り当てないでください。');
+
+  var result = callClaude_([{ type: 'text', text: lines.join('\n') }],
+    LIST_MATCH_SCHEMA, MODEL_TEXT);
   return (result && result.matches) || [];
+}
+
+/**
+ * matchListByClaude_ の結果から、まだ使っていない行を1つ取り出す。
+ * 同じ行を2つの品名に割り当てないよう taken で除く。
+ */
+function pickMatch_(said, matches, rows, taken) {
+  for (var i = 0; i < matches.length; i++) {
+    if (matches[i].said !== said || !matches[i].row) continue;
+    if (taken.indexOf(matches[i].row) >= 0) return null;
+    for (var j = 0; j < rows.length; j++) {
+      if (rows[j].row === matches[i].row) return rows[j];
+    }
+    return null;
+  }
+  return null;
 }
 
 /** 在庫にある「名前|期限」の集合。重複判定に使う */
@@ -1302,23 +1336,14 @@ function consumeItems_(items, disposed) {
     var matches = [];
     if (remaining.length) {
       try {
-        matches = matchStockByClaude_(unresolved, remaining);
+        matches = matchListByClaude_(unresolved, remaining, 'stock');
       } catch (err) {
         console.error('在庫の意味照合に失敗: ' + err.stack);
       }
     }
 
     unresolved.forEach(function (said) {
-      var hit = null;
-      for (var j = 0; j < matches.length; j++) {
-        if (matches[j].said !== said || !matches[j].row) continue;
-        for (var k = 0; k < remaining.length; k++) {
-          if (remaining[k].row === matches[j].row && session.changed.indexOf(matches[j].row) < 0) {
-            hit = remaining[k];
-          }
-        }
-        break;
-      }
+      var hit = pickMatch_(said, matches, remaining, session.changed);
       if (hit) markRow_(sh, hit, session); else session.missed.push(said);
     });
   }
@@ -1886,7 +1911,16 @@ function shopBought_(names) {
   var done = [];
   var missed = [];
   var changed = [];
+  var unresolved = [];
 
+  function take(hit) {
+    sh.getRange(hit.row, SHOP_COL.STATUS).setValue(SHOP_STATUS.DONE);
+    sh.getRange(hit.row, SHOP_COL.UPDATED).setValue(stamp);
+    changed.push(hit.row);
+    done.push(hit.name);
+  }
+
+  // 第1段階: 名前の文字列一致で探す（API を使わないので速い）
   names.forEach(function (n) {
     var key = normalizeName_(n);
     if (!key) { missed.push(n || '(名称不明)'); return; }
@@ -1898,13 +1932,28 @@ function shopBought_(names) {
       if (name.indexOf(key) >= 0 || key.indexOf(name) >= 0) { hit = todo[i]; break; }
     }
 
-    if (!hit) { missed.push(n); return; }
-
-    sh.getRange(hit.row, SHOP_COL.STATUS).setValue(SHOP_STATUS.DONE);
-    sh.getRange(hit.row, SHOP_COL.UPDATED).setValue(stamp);
-    changed.push(hit.row);
-    done.push(hit.name);
+    if (hit) take(hit); else unresolved.push(n);  // 第2段階に回す
   });
+
+  // 第2段階: 文字列で当たらなかったものだけ、意味で照合する。
+  // 在庫と同じ扱い。「とうふ」→「豆腐」や「ヨーグルト」→「ブルガリアヨーグルト」を拾う。
+  // 当たらなかったときだけ呼ぶので、ふだんは API を使わない。
+  if (unresolved.length) {
+    var remaining = todo.filter(function (t) { return changed.indexOf(t.row) < 0; });
+    var matches = [];
+    if (remaining.length) {
+      try {
+        matches = matchListByClaude_(unresolved, remaining, 'shopping');
+      } catch (err) {
+        console.error('買い物リストの意味照合に失敗: ' + err.stack);
+      }
+    }
+
+    unresolved.forEach(function (said) {
+      var hit = pickMatch_(said, matches, remaining, changed);
+      if (hit) take(hit); else missed.push(said);
+    });
+  }
 
   if (changed.length) {
     setLastOp_({ type: 'shop_bought', sheet: 'shopping', rows: changed });
