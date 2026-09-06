@@ -1359,7 +1359,7 @@ function markRow_(sh, choice, session) {
     .setValue(STATUS.USED);
   sh.getRange(choice.row, COL.UPDATED).setValue(nowStamp_());
   session.changed.push(choice.row);
-  session.done.push(withDate_(choice.name, choice.date, choice.label));
+  session.done.push(choice.name);
 }
 
 /** 名前も期限も同じなら、どちらを消しても結果は変わらない */
@@ -1641,11 +1641,13 @@ function undoLast_() {
 
   op.rows.forEach(function (row) {
     if (row > sh.getLastRow()) return;
-    names.push(withDate_(
-      sh.getRange(row, COL.NAME).getValue(),
-      normalizeYmd_(sh.getRange(row, COL.DATE).getValue()),
-      sh.getRange(row, COL.LABEL).getValue()
-    ));
+    var name = sh.getRange(row, COL.NAME).getValue();
+    // 登録の取り消しは期限を添えて何を取り消したか分かるようにする。
+    // 消費の取り消し（在庫に戻す）は期限を出さない。
+    names.push(op.type === 'register'
+      ? withDate_(name, normalizeYmd_(sh.getRange(row, COL.DATE).getValue()),
+          sh.getRange(row, COL.LABEL).getValue())
+      : name);
     sh.getRange(row, COL.STATUS)
       .setValue(op.type === 'register' ? STATUS.CANCELED : STATUS.STOCK);
     sh.getRange(row, COL.UPDATED).setValue(stamp);
