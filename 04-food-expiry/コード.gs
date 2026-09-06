@@ -64,12 +64,13 @@ var SHOP_SHEET_NAME = '買い物リスト';
 var SHOP_COL = {
   ADDED: 1,    // 追加日 (YYYY-MM-DD)
   NAME: 2,     // 品名
-  STATUS: 3,   // 未購入 / 購入済 / 取消
-  UPDATED: 4   // 状態を最後に変えた日時
+  CATEGORY: 3, // 区分（CATEGORIES のいずれか）
+  STATUS: 4,   // 未購入 / 購入済 / 取消
+  UPDATED: 5   // 状態を最後に変えた日時
 };
-var SHOP_COL_COUNT = 4;
+var SHOP_COL_COUNT = 5;
 
-var SHOP_HEADERS = ['追加日', '品名', '状態', '更新日時'];
+var SHOP_HEADERS = ['追加日', '品名', '区分', '状態', '更新日時'];
 
 var SHOP_STATUS = { TODO: '未購入', DONE: '購入済', CANCELED: '取消' };
 
@@ -263,8 +264,9 @@ function runShopCommand_(action, text) {
   var items = parseItemNames_(text);
   if (!items.length) return '品名を読み取れませんでした。';
 
+  if (action === 'shop_add') return shopAdd_(items);
   var names = items.map(function (it) { return it.name; });
-  return action === 'shop_add' ? shopAdd_(names) : shopBought_(names);
+  return shopBought_(names);
 }
 
 /** 在庫から消す食材を Claude に特定させ、消費として記録する */
@@ -414,7 +416,10 @@ function handleText_(event, text) {
       return;
     }
     if (intent === 'shop_add' && names.length) {
-      replyText_(event.replyToken, note + shopAdd_(names));
+      var shopItems = items
+        .filter(function (it) { return it.item_name; })
+        .map(function (it) { return { name: it.item_name, category: it.category }; });
+      replyText_(event.replyToken, note + shopAdd_(shopItems));
       return;
     }
     if (intent === 'shop_bought' && names.length) {
@@ -568,7 +573,7 @@ var TEXT_ITEM_SCHEMA = {
   type: 'object',
   properties: {
     item_name: { type: 'string', description: '食材名。明らかな音声誤認識は妥当な食材名に訂正する。内容量や型番は含めない' },
-    category: { type: 'string', description: '区分。次のいずれか1つ: ' + CATEGORIES.join(' / ') + '。intent が register のときだけ判定し、それ以外は空文字でよい' },
+    category: { type: 'string', description: '区分。次のいずれか1つ: ' + CATEGORIES.join(' / ') + '。intent が register または shop_add のときだけ判定し、それ以外は空文字でよい' },
     quantity: { type: 'number', description: '個数。「2個買った」のように明示された場合のみその数。述べられていなければ 1' },
     found: { type: 'boolean', description: 'この食材の期限を特定できたか' },
     label: { type: 'string', description: '「賞味期限」か「消費期限」のいずれか。消費期限と明示された場合のみ「消費期限」、それ以外は「賞味期限」' },
@@ -632,6 +637,12 @@ function buildTextPrompt_(text) {
     '- 「牛乳は9月10日」        … 期限を伝えている → register',
     'shop_add / shop_bought では品名だけを items に入れ、date は空文字にしてください。',
     '',
+    '区分（category）について:',
+    '- intent が register または shop_add のときだけ、次の7つから1つを選んで category に入れてください: '
+      + CATEGORIES.join(' / '),
+    '- 迷ったときの目安: 豆腐・納豆・こんにゃくなどの日配品は「卵・乳製品」、乾物・缶詰・冷凍食品は「主食・加工食品」。',
+    '- それ以外の intent（consume / discard / shop_bought など）では category は空文字にしてください。',
+    '',
     'consume / discard の場合は、対象の食材名だけを items に入れてください。',
     'その場合 date は空文字、found は false のままで構いません（日付が述べられていればその日付を入れてください）。',
     '個数が述べられていれば quantity に入れてください。例:「片栗粉2つ捨てた」→ quantity=2。',
@@ -639,11 +650,6 @@ function buildTextPrompt_(text) {
     'なお 99 を使うのは consume / discard のときだけです。register では実際に買った個数だけを入れてください。',
     '',
     'register の場合は、以下に従って期限日を特定してください。',
-    '',
-    '区分（category）について:',
-    '- register のときだけ、次の7つから1つを選んで category に入れてください: ' + CATEGORIES.join(' / '),
-    '- 迷ったときの目安: 豆腐・納豆・こんにゃくなどの日配品は「卵・乳製品」、乾物・缶詰・冷凍食品は「主食・加工食品」。',
-    '- register 以外の intent（consume / discard / shop_add など）では category は空文字にしてください。',
     '',
     '入力文はスマートフォンの音声入力で作られている前提です。次の特徴を考慮してください。',
     '',
@@ -753,10 +759,11 @@ var NAMES_SCHEMA = {
         type: 'object',
         properties: {
           name: { type: 'string', description: '品名。個数・内容量・助詞は含めない' },
+          category: { type: 'string', description: '区分。次のいずれか1つ: ' + CATEGORIES.join(' / ') },
           quantity: { type: 'number', description: '個数。述べられていなければ 1。「全部」は 99' },
           note: { type: 'string', description: '訂正や判断に迷った点を日本語で1文。なければ空文字' }
         },
-        required: ['name', 'quantity', 'note'],
+        required: ['name', 'category', 'quantity', 'note'],
         additionalProperties: false
       }
     }
@@ -793,6 +800,10 @@ function buildNamesPrompt_(text) {
     '  内容量（1リットル、400g）は個数ではないので quantity は 1 のままにしてください。',
     '- 述べられていなければ quantity は 1 にしてください。',
     '- 「全部」「すべて」と言われた場合は quantity を 99 にしてください。',
+    '',
+    '区分（category）について:',
+    '- 次の7つから1つを選んで category に入れてください: ' + CATEGORIES.join(' / '),
+    '- 迷ったときの目安: 豆腐・納豆・こんにゃくなどの日配品は「卵・乳製品」、乾物・缶詰・冷凍食品は「主食・加工食品」。',
     '',
     '--- 入力 ---',
     text
@@ -971,6 +982,19 @@ function migrateAddCategoryColumn() {
   sh.getRange(2, COL.DATE, sh.getMaxRows() - 1, 1).setNumberFormat('@');
   sh.getRange(2, COL.REG_TIME, sh.getMaxRows() - 1, 1).setNumberFormat('@');
   console.log('区分列を追加しました。');
+}
+
+/**
+ * 買い物リストにも「区分」列を追加する一度きりの移行処理。
+ * 品名（列2）の右に新しい列を挿入し、ヘッダー行を今の SHOP_HEADERS に合わせて書き直す。
+ * こちらはデータをクリアしていないので、既存行は列がずれるだけで値は保持される
+ * （区分だけ空欄のまま残る）。エディタから1回だけ実行する。
+ */
+function migrateAddShopCategoryColumn() {
+  var sh = shopSheet_();
+  sh.insertColumnAfter(2);
+  sh.getRange(1, 1, 1, SHOP_COL_COUNT).setValues([SHOP_HEADERS]).setFontWeight('bold');
+  console.log('買い物リストに区分列を追加しました。');
 }
 
 /** Date でも文字列でも 'YYYY-MM-DD' に揃える */
@@ -1874,10 +1898,12 @@ function shopTodoRows_(sh) {
 }
 
 /** 買い物リストに品名を追加する。すでに未購入で載っているものは足さない */
-function shopAdd_(names) {
-  var clean = names
-    .map(function (n) { return String(n || '').trim(); })
-    .filter(function (n) { return n; });
+function shopAdd_(items) {
+  var clean = items
+    .map(function (it) {
+      return { name: String((it && it.name) || '').trim(), category: (it && it.category) || '' };
+    })
+    .filter(function (it) { return it.name; });
   if (!clean.length) return '追加するものを読み取れませんでした。';
 
   var sh = shopSheet_();
@@ -1887,21 +1913,22 @@ function shopAdd_(names) {
 
   var added = [];
   var dup = [];
-  clean.forEach(function (n) {
-    var key = normalizeName_(n);
+  clean.forEach(function (it) {
+    var key = normalizeName_(it.name);
     if (known[key]) { dup.push(known[key]); return; }
-    known[key] = n;   // 同じ発話の中での重複も防ぐ
-    added.push(n);
+    known[key] = it.name;   // 同じ発話の中での重複も防ぐ
+    added.push(it);
   });
 
   var lines = [];
   if (added.length) {
     var startRow = sh.getLastRow() + 1;
     var stamp = nowStamp_();
-    var values = added.map(function (n) {
+    var values = added.map(function (it) {
       var row = new Array(SHOP_COL_COUNT).fill('');
       row[SHOP_COL.ADDED - 1] = todayStamp_();
-      row[SHOP_COL.NAME - 1] = n;
+      row[SHOP_COL.NAME - 1] = it.name;
+      row[SHOP_COL.CATEGORY - 1] = it.category;
       row[SHOP_COL.STATUS - 1] = SHOP_STATUS.TODO;
       row[SHOP_COL.UPDATED - 1] = stamp;
       return row;
@@ -1916,7 +1943,7 @@ function shopAdd_(names) {
 
     lines.push('買い物リストに追加しました（' + added.length + '件）');
     lines.push('');
-    added.forEach(function (n, i) { lines.push((i + 1) + '. ' + n); });
+    added.forEach(function (it, i) { lines.push((i + 1) + '. ' + it.name); });
   }
 
   if (dup.length) {
