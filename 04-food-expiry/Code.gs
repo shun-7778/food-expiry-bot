@@ -22,8 +22,6 @@
  */
 var MODEL_VISION = 'claude-sonnet-5';
 var MODEL_TEXT = 'claude-haiku-4-5';
-
-var ANTHROPIC_MODEL = MODEL_VISION;    // testConfig の疎通確認用
 var ANTHROPIC_VERSION = '2023-06-01';
 var MAX_IMAGE_BYTES = 4 * 1024 * 1024; // Claude の画像サイズ上限に対する安全マージン
 
@@ -618,53 +616,6 @@ function setupSpreadsheet() {
   console.log('作成しました: ' + ss.getUrl());
 }
 
-/**
- * 「登録日時」1列だったシートを「登録日」「登録時刻」の2列に分ける。
- * エディタから1回だけ実行する。実行前にシートを複製してバックアップを残す。
- * すでに移行済みなら何もしない。
- */
-function migrateSplitRegisteredAt() {
-  var sh = sheet_();
-  var header = sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 2)).getValues()[0];
-
-  if (header[0] === '登録日' && header[1] === '登録時刻') {
-    console.log('移行済みです。何もしません。');
-    return;
-  }
-  if (header[0] !== '登録日時') {
-    throw new Error('想定外のヘッダーです（1列目=「' + header[0] + '」）。手動で確認してください。');
-  }
-
-  // 上書きする前にバックアップを取る
-  var ss = sh.getParent();
-  var backupName = '在庫_backup_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmm');
-  sh.copyTo(ss).setName(backupName);
-  console.log('バックアップを作成しました: ' + backupName);
-
-  sh.insertColumnAfter(1);
-  sh.getRange(1, 1, 1, 2).setValues([['登録日', '登録時刻']]).setFontWeight('bold');
-
-  var last = sh.getLastRow();
-  if (last >= 2) {
-    var src = sh.getRange(2, 1, last - 1, 1).getValues();
-    var out = src.map(function (r) {
-      var v = r[0];
-      if (v instanceof Date) {
-        return [Utilities.formatDate(v, 'Asia/Tokyo', 'yyyy-MM-dd'),
-                Utilities.formatDate(v, 'Asia/Tokyo', 'HH:mm')];
-      }
-      var s = String(v || '').trim();
-      if (!s) return ['', ''];
-      var m = s.match(/^(\d{4}-\d{2}-\d{2})[ T]?(\d{1,2}:\d{2})?/);
-      return m ? [m[1], m[2] || ''] : [s, ''];
-    });
-    sh.getRange(2, COL.REG_TIME, out.length, 1).setNumberFormat('@');
-    sh.getRange(2, 1, out.length, 2).setValues(out);
-  }
-
-  console.log('移行しました。' + Math.max(last - 1, 0) + '行を「登録日」「登録時刻」に分割しました。');
-}
-
 /** Date でも文字列でも 'YYYY-MM-DD' に揃える */
 function normalizeYmd_(v) {
   if (!v) return '';
@@ -735,11 +686,15 @@ function normalizeLabel_(label) {
   return label === '消費期限' ? '消費期限' : '賞味期限';
 }
 
-/** 個数は 1〜20 に丸める。誤認識で大量登録されるのを防ぐ */
-function normalizeQty_(q) {
+/**
+ * 個数を 1〜max に丸める。誤認識による暴発を防ぐためのもの。
+ * 登録は実在する買い物の数なので 20 まで、
+ * 消費・破棄は「全部」を 99 で表すので 99 まで許す。
+ */
+function clampQty_(q, max) {
   var n = parseInt(q, 10);
   if (!n || n < 1) return 1;
-  return Math.min(n, 20);
+  return Math.min(n, max);
 }
 
 /** 実際にシートへ追記し、追記した行番号を返す */
@@ -785,7 +740,7 @@ function registerItems_(items, source) {
     }
     // 返信とシートで表示が食い違わないよう、ここで種別を確定させる
     it.label = normalizeLabel_(it.label);
-    var qty = normalizeQty_(it.quantity);
+    var qty = clampQty_(it.quantity, 20);
     for (var i = 0; i < qty; i++) {
       ok.push({ item: it, stated: qty > 1 });
     }
@@ -1010,7 +965,7 @@ function consumeItems_(items, disposed) {
 
     candidates.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
     // 何件処理するかは advanceQueue_ が判断する（自動で片付くならそこで片付く）
-    session.queue.push({ said: it.item_name, choices: candidates, need: consumeQty_(it.quantity) });
+    session.queue.push({ said: it.item_name, choices: candidates, need: clampQty_(it.quantity, 99) });
   });
 
   // 第2段階: 文字列で当たらなかったものだけ、意味でClaudeに照合させる
@@ -1051,13 +1006,6 @@ function markRow_(sh, choice, session) {
   sh.getRange(choice.row, COL.UPDATED).setValue(nowStamp_());
   session.changed.push(choice.row);
   session.done.push(withDate_(choice.name, choice.date, choice.label));
-}
-
-/** 消費・破棄の個数。「全部」を大きな数で表すため上限は 99 */
-function consumeQty_(q) {
-  var n = parseInt(q, 10);
-  if (!n || n < 1) return 1;
-  return Math.min(n, 99);
 }
 
 /** 名前も期限も同じなら、どちらを消しても結果は変わらない */
@@ -1473,13 +1421,16 @@ function testConfig() {
     console.log(k + ': ' + (prop_(k, false) ? 'OK' : '*** 未設定 ***'));
   });
 
-  var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/models/' + ANTHROPIC_MODEL, {
-    method: 'get',
-    headers: {
-      'x-api-key': prop_('ANTHROPIC_API_KEY', true),
-      'anthropic-version': ANTHROPIC_VERSION
-    },
-    muteHttpExceptions: true
+  [MODEL_VISION, MODEL_TEXT].forEach(function (model) {
+    var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/models/' + model, {
+      method: 'get',
+      headers: {
+        'x-api-key': prop_('ANTHROPIC_API_KEY', true),
+        'anthropic-version': ANTHROPIC_VERSION
+      },
+      muteHttpExceptions: true
+    });
+    console.log(model + ': HTTP ' + res.getResponseCode()
+      + (res.getResponseCode() === 200 ? ' OK' : ' / ' + res.getContentText().substring(0, 150)));
   });
-  console.log('Claude API 疎通: HTTP ' + res.getResponseCode() + ' / ' + res.getContentText().substring(0, 200));
 }
