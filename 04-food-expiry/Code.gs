@@ -151,6 +151,15 @@ function handleEvent_(event) {
 var HELP_MESSAGE = [
   '使い方',
   '',
+  '■ ボタン（入力欄の上）',
+  '押すと入力欄に「登録 」などが入ります。',
+  '続けて中身を打って送ってください。',
+  '　登録 牛乳 9月10日',
+  '　使った 牛乳',
+  '　買い物追加 牛乳と卵',
+  '種別が確定するので、取り違えが起きません。',
+  'これまでどおり接頭辞なしでも送れます。',
+  '',
   '■ 登録',
   '・賞味期限が写った写真を送る（複数商品まとめて可）',
   '・「豆乳は2027年2月21日 ヨーグルトは9月17日」と送る',
@@ -182,6 +191,107 @@ var HELP_MESSAGE = [
 
 var PHOTO_EMPTY_MESSAGE = '食品を検出できませんでした。\n商品と期限の印字が写るように撮り直してみてください。';
 var TEXT_EMPTY_MESSAGE = '食材と期限を読み取れませんでした。\n「豆乳は2027年2月21日」のように、食材名と日付を続けて送ってください。';
+
+// ---------------------------------------------------------------- 接頭辞コマンド
+
+/**
+ * 「登録 牛乳 9月10日」のように、先頭で操作を宣言してもらう形。
+ * 常時ボタンとして出しておき、押すと fill が入力欄に差し込まれる（postback の
+ * fillInText）。種別が確定するので intent の推定が要らなくなり、
+ * 「牛乳買った（買い物リスト）」と「牛乳使った（在庫の消費）」の取り違えが起きない。
+ *
+ * 押しただけで送信されるわけではなく、続きを打って自分で送信する。
+ * 接頭辞を消して送ることもできるので、従来どおりの自由入力も残る。
+ */
+var COMMAND_BUTTONS = [
+  { label: '期限登録', fill: '登録 ' },
+  { label: '使用した', fill: '使った ' },
+  { label: '破棄した', fill: '捨てた ' },
+  { label: '買い物リストに追加', fill: '買い物追加 ' },
+  { label: '買い物リストから削除', fill: '買った ' }
+];
+
+// 接頭辞として認める語。ボタンが差し込む語のほかに、手打ちしそうな言い方も拾う
+var COMMAND_WORDS = {
+  '登録': 'register',
+  '使った': 'consume',
+  '消費': 'consume',
+  '捨てた': 'discard',
+  '破棄': 'discard',
+  '買い物追加': 'shop_add',
+  '買い物リスト追加': 'shop_add',
+  '買った': 'shop_bought',
+  '購入': 'shop_bought'
+};
+
+// ボタンだけ押して中身を書かずに送られたときの案内
+var COMMAND_HINTS = {
+  register: '「登録 牛乳 9月10日」のように、食材名と期限を続けて送ってください。',
+  consume: '「使った 牛乳」のように、使った食材名を続けて送ってください。',
+  discard: '「捨てた 豆腐」のように、捨てた食材名を続けて送ってください。',
+  shop_add: '「買い物追加 牛乳と卵」のように、買うものを続けて送ってください。',
+  shop_bought: '「買った 牛乳」のように、買ってきたものを続けて送ってください。'
+};
+
+/**
+ * 接頭辞つきの入力を {action, rest} に分解する。接頭辞がなければ null。
+ * 区切りの空白を必須にしているので、「買ったよ牛乳」のような地の文は拾わない。
+ */
+function parseCommand_(text) {
+  var m = String(text).trim().match(/^([^\s　:：]+)(?:[\s　:：]+([\s\S]+))?$/);
+  if (!m) return null;
+
+  var action = COMMAND_WORDS[m[1]];
+  if (!action) return null;
+
+  // ボタンを押しただけで送ると接頭辞だけが届く。案内を返せるよう rest は空で通す
+  return { action: action, rest: (m[2] || '').trim() };
+}
+
+/**
+ * 接頭辞で種別が確定した入力を処理する。
+ * 品名だけで済むものは Claude を呼ばずにその場で片付け、
+ * 個数や日付が混じるものだけ解析に回す（intent は使わず、押されたボタンを優先する）。
+ */
+function runCommand_(cmd) {
+  if (!cmd.rest) return COMMAND_HINTS[cmd.action];
+
+  // 買い物リストは品名だけなので API が要らない。空白も区切りとして扱う
+  if (cmd.action === 'shop_add' || cmd.action === 'shop_bought') {
+    var names = splitNames_(cmd.rest);
+    if (names) {
+      return cmd.action === 'shop_add' ? shopAdd_(names) : shopBought_(names);
+    }
+  }
+
+  // 消費・破棄は取り違えると在庫が消えるので、空白を含む場合は自前で切らない。
+  // 「明治 ブルガリアヨーグルト」を2品と誤解しないため。
+  if ((cmd.action === 'consume' || cmd.action === 'discard') && !/[\s　]/.test(cmd.rest)) {
+    var simple = splitNames_(cmd.rest);
+    if (simple) {
+      return consumeItems_(
+        simple.map(function (n) { return { item_name: n }; }),
+        cmd.action === 'discard');
+    }
+  }
+
+  var result = parseTextExpiry_(cmd.rest);
+  var items = (result && result.items) || [];
+  if (!items.length) {
+    return cmd.action === 'register' ? TEXT_EMPTY_MESSAGE : '対象を読み取れませんでした。';
+  }
+
+  if (cmd.action === 'register') return registerItems_(items, 'テキスト');
+
+  if (cmd.action === 'shop_add' || cmd.action === 'shop_bought') {
+    var parsed = items.map(function (it) { return it.item_name; })
+      .filter(function (n) { return n; });
+    if (!parsed.length) return '品名を読み取れませんでした。';
+    return cmd.action === 'shop_add' ? shopAdd_(parsed) : shopBought_(parsed);
+  }
+
+  return consumeItems_(items, cmd.action === 'discard');
+}
 
 function handleText_(event, text) {
   // Claude を呼ばずに済む固定コマンドは先に処理する
@@ -222,6 +332,18 @@ function handleText_(event, text) {
   }
   if (text === '在庫' || text === '一覧' || text === 'リスト') {
     replyText_(event.replyToken, note + listStock_());
+    return;
+  }
+
+  // 接頭辞で種別が宣言されていれば、推定せずそのとおりに処理する
+  var cmd = parseCommand_(text);
+  if (cmd) {
+    try {
+      replyText_(event.replyToken, prefixReply_(note, runCommand_(cmd)));
+    } catch (err) {
+      console.error('接頭辞コマンドの処理に失敗: ' + err.stack);
+      replyText_(event.replyToken, note + '処理に失敗しました。\n' + err.message);
+    }
     return;
   }
 
@@ -352,26 +474,48 @@ function prefixReply_(note, reply) {
   return note ? { text: note + r.text, labels: r.labels } : r;
 }
 
-function buildQuickReply_(labels) {
+/**
+ * ボタン1つ分を組み立てる。指定のしかたで2種類ある。
+ *   文字列        … 押すとその文字列がそのまま送信される（番号の選択など）
+ *   {label, fill} … 押しても送信されず、fill が入力欄に入ってキーボードが開く。
+ *                   続きを打って自分で送るため、接頭辞コマンドに使う。
+ */
+function quickReplyItem_(spec) {
+  if (typeof spec === 'string') {
+    return {
+      type: 'action',
+      action: { type: 'message', label: spec.substring(0, 20), text: spec }
+    };
+  }
   return {
-    items: labels.slice(0, QUICK_REPLY_MAX).map(function (label) {
-      var s = String(label);
-      return {
-        type: 'action',
-        action: { type: 'message', label: s.substring(0, 20), text: s }
-      };
-    })
+    type: 'action',
+    action: {
+      type: 'postback',
+      label: spec.label.substring(0, 20),
+      data: 'fill',              // 使わないが postback には必須。doPost 側では無視される
+      inputOption: 'openKeyboard',
+      fillInText: spec.fill
+    }
   };
 }
 
-/** 返信トークンで返す。reply は文字列または {text, labels} */
+function buildQuickReply_(labels) {
+  return { items: labels.slice(0, QUICK_REPLY_MAX).map(quickReplyItem_) };
+}
+
+/**
+ * 返信トークンで返す。reply は文字列または {text, labels}。
+ * labels の指定がない返信には、既定として接頭辞コマンドのボタンを添える。
+ * 出したくない場合は labels に空配列を渡す。
+ */
 function replyText_(replyToken, reply) {
   if (!replyToken) return;
 
   var r = asReply_(reply);
+  var labels = r.labels || COMMAND_BUTTONS;
   var message = { type: 'text', text: r.text.substring(0, 4900) };
-  if (r.labels && r.labels.length) {
-    message.quickReply = buildQuickReply_(r.labels);
+  if (labels.length) {
+    message.quickReply = buildQuickReply_(labels);
   }
 
   var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', {
@@ -1567,7 +1711,12 @@ function pushText_(text) {
     headers: { Authorization: 'Bearer ' + prop_('LINE_CHANNEL_ACCESS_TOKEN', true) },
     payload: JSON.stringify({
       to: to,
-      messages: [{ type: 'text', text: text.substring(0, 4900) }]
+      // 通知を見てすぐ「捨てた 〇〇」と返せるよう、push にもボタンを添える
+      messages: [{
+        type: 'text',
+        text: text.substring(0, 4900),
+        quickReply: buildQuickReply_(COMMAND_BUTTONS)
+      }]
     }),
     muteHttpExceptions: true
   });
