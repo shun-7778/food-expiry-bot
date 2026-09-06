@@ -296,7 +296,7 @@ var ITEM_SCHEMA = {
     position: { type: 'string', description: '写真内の位置。例「左」「中央」「右奥」。1点しか写っていなければ空文字' },
     item_name: { type: 'string', description: 'ブランド名＋商品名のみ。内容量・型番・キャッチコピーは含めない。読み取れなければ空文字' },
     found: { type: 'boolean', description: 'この商品の期限表示を読み取れたか' },
-    label: { type: 'string', description: '「賞味期限」「消費期限」「製造日」「不明」のいずれか' },
+    label: { type: 'string', description: '「賞味期限」か「消費期限」のいずれか。消費期限と印字されている場合のみ「消費期限」、それ以外は「賞味期限」' },
     date: { type: 'string', description: 'YYYY-MM-DD 形式。年月のみの表示ならその月の末日。読めなければ空文字' },
     date_precision: { type: 'string', description: '"day" | "month" | "none"' },
     raw_text: { type: 'string', description: '画像上の期限表示をそのまま書き写したもの' },
@@ -326,7 +326,7 @@ var TEXT_ITEM_SCHEMA = {
     item_name: { type: 'string', description: '食材名。明らかな音声誤認識は妥当な食材名に訂正する。内容量や型番は含めない' },
     quantity: { type: 'number', description: '個数。「2個買った」のように明示された場合のみその数。述べられていなければ 1' },
     found: { type: 'boolean', description: 'この食材の期限を特定できたか' },
-    label: { type: 'string', description: '「賞味期限」「消費期限」「不明」のいずれか。言及がなければ「不明」' },
+    label: { type: 'string', description: '「賞味期限」か「消費期限」のいずれか。消費期限と明示された場合のみ「消費期限」、それ以外は「賞味期限」' },
     date: { type: 'string', description: 'YYYY-MM-DD 形式。特定できなければ空文字' },
     date_precision: { type: 'string', description: '"day" | "month" | "none"' },
     raw_text: { type: 'string', description: '入力文のうち、この食材に対応する部分をそのまま抜き出したもの' },
@@ -403,7 +403,15 @@ function buildTextPrompt_(text) {
     '- 年が省略された場合（例「9月17日」「8/3」）は、今日以降で最も近い年を補ってください。',
     '- 相対表現を解決してください。「今日」「明日」「明後日」「3日後」「今週末」「来週の水曜」「今月末」など。',
     '- 「〜まで」「〜が期限」などの言い回しは期限日を指します。',
-    '- 「賞味期限」「消費期限」と明示された場合のみ label にその語を入れ、言及がなければ「不明」にしてください。',
+    '- label は「賞味期限」か「消費期限」のどちらかです。取り違えると安全性の判断が変わるため慎重に扱ってください。',
+    '  「消費期限」と明示された場合のみ label を "消費期限" にします。「消費」「消費期限が」「消費の方」なども同じ扱いです。',
+    '  それ以外はすべて "賞味期限" にしてください。何も言われていない場合も "賞味期限" です。',
+    '  例:「牛乳は消費期限が9月10日」→ label="消費期限"',
+    '  例:「豆腐、消費期限明日まで」→ label="消費期限"',
+    '  例:「味噌は9月30日」→ label="賞味期限"',
+    '  1つの発話に複数の食材がある場合、ラベルは食材ごとに判断してください。',
+    '  例:「牛乳は消費期限9月10日、味噌は9月30日」→ 牛乳="消費期限"、味噌="賞味期限"',
+    '  「消費期限」という語が1つの食材に付いていても、他の食材まで消費期限にしないこと。',
     '- 月までしか述べられていない場合（例「10月くらい」）は、その月の末日を date に入れ date_precision を "month"、confidence を "low" にしてください。',
     '- 日付をまったく特定できない食材は、items から省かずに found を false、date を空文字で入れてください。推測で日付を作らないこと。',
     '',
@@ -440,7 +448,9 @@ function buildPrompt_() {
     '日付の読み取りについて:',
     '- 日本の食品では「25.09.06」「25 09 06」「2026.9」「26.09」「2027 02 21」などの表記が使われます。',
     '- 年月のみの表示（例「2026.9」）は、その月の末日を date に入れ、date_precision を "month" にしてください。',
-    '- 「賞味期限」と「消費期限」を取り違えないこと。ラベル文字が読めない場合は label を "不明" にしてください。',
+    '- label は「消費期限」と印字されている場合のみ "消費期限"、それ以外はすべて "賞味期限" にしてください。',
+    '  ラベル文字が読み取れない場合も "賞味期限" にします。',
+    '  「消費期限」は過ぎたら食べない方がよいという意味なので、印字を慎重に確認してください。',
     '- 製造日・ロット番号・製造所固有記号・バーコード・価格・内容量を期限と誤認しないこと。',
     '  例:「26.09.14.K11」の K11、「26.09.17/+KA L01」の +KA L01、「2027 02 21 +KN/AAS132」の +KN/AAS132 は記号であり日付ではありません。',
     '- インクジェット印字がかすれている、曲面で歪んでいるなど確信が持てない場合は confidence を "low" にし、note に理由を書いてください。',
@@ -563,7 +573,8 @@ function formatItem_(it, prefix) {
   var approx = it.date_precision === 'month' ? '頃' : '';
   var warn = it.confidence === 'high' ? '' : ' ⚠';
 
-  return prefix + name + '\n  ' + it.date + approx + '（' + remain + '）' + warn;
+  return prefix + name + '\n  ' + labelPrefix_(it.label) + it.date + approx
+    + '（' + remain + '）' + warn;
 }
 
 // ---------------------------------------------------------------- スプレッドシート操作
@@ -617,12 +628,20 @@ function nowStamp_() {
   return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
 }
 
-/** 「商品名（2026-09-17・あと11日）」の形にする。どの商品を操作したか一目で確かめられるように */
-function withDate_(name, date) {
+/**
+ * 表示に使うラベル。消費期限は「過ぎたら食べない」という安全側の意味を持つので、
+ * 賞味期限と取り違えないよう必ず出す。読み取れていない場合は何も付けない。
+ */
+function labelPrefix_(label) {
+  return (label === '賞味期限' || label === '消費期限') ? label + ' ' : '';
+}
+
+/** 「商品名（消費期限 2026-09-17・あと11日）」の形にする */
+function withDate_(name, date, label) {
   if (!date) return name;
   var d = daysLeft_(date);
   var remain = d < 0 ? (d * -1) + '日超過' : d === 0 ? '今日まで' : 'あと' + d + '日';
-  return name + '（' + date + '・' + remain + '）';
+  return name + '（' + labelPrefix_(label) + date + '・' + remain + '）';
 }
 
 /** シート1行を、表示用のアイテムオブジェクトに変換する */
@@ -650,6 +669,11 @@ function getLastOp_() {
   return s ? JSON.parse(s) : null;
 }
 
+/** 種別は「消費期限」と明示されたときだけ消費期限。それ以外はすべて賞味期限に寄せる */
+function normalizeLabel_(label) {
+  return label === '消費期限' ? '消費期限' : '賞味期限';
+}
+
 /** 個数は 1〜20 に丸める。誤認識で大量登録されるのを防ぐ */
 function normalizeQty_(q) {
   var n = parseInt(q, 10);
@@ -670,7 +694,7 @@ function appendRows_(sh, items, source) {
     row[COL.NAME - 1] = it.item_name || '(名称不明)';
     row[COL.DATE - 1] = it.date;
     row[COL.PRECISION - 1] = it.date_precision || 'day';
-    row[COL.LABEL - 1] = it.label || '不明';
+    row[COL.LABEL - 1] = normalizeLabel_(it.label);
     row[COL.CONFIDENCE - 1] = it.confidence || 'high';
     row[COL.SOURCE - 1] = source;
     row[COL.RAW - 1] = it.raw_text || '';
@@ -697,6 +721,8 @@ function registerItems_(items, source) {
       ng.push(it.item_name || '(名称不明)');
       return;
     }
+    // 返信とシートで表示が食い違わないよう、ここで種別を確定させる
+    it.label = normalizeLabel_(it.label);
     var qty = normalizeQty_(it.quantity);
     for (var i = 0; i < qty; i++) {
       ok.push({ item: it, stated: qty > 1 });
@@ -888,7 +914,8 @@ function consumeItems_(items, disposed) {
     stock.push({
       row: i + 2,
       name: data[i][COL.NAME - 1],
-      date: normalizeYmd_(data[i][COL.DATE - 1])
+      date: normalizeYmd_(data[i][COL.DATE - 1]),
+      label: data[i][COL.LABEL - 1]
     });
   }
   if (!stock.length) return '在庫がありません。';
@@ -965,7 +992,7 @@ function markRow_(sh, choice, session) {
     .setValue(session.action === 'discard' ? STATUS.DISCARDED : STATUS.USED);
   sh.getRange(choice.row, COL.UPDATED).setValue(nowStamp_());
   session.changed.push(choice.row);
-  session.done.push(withDate_(choice.name, choice.date));
+  session.done.push(withDate_(choice.name, choice.date, choice.label));
 }
 
 /**
@@ -999,7 +1026,7 @@ function formatQuestion_(q, action) {
     ''
   ];
   q.choices.forEach(function (c, i) {
-    lines.push((i + 1) + '. ' + withDate_(c.name, c.date));
+    lines.push((i + 1) + '. ' + withDate_(c.name, c.date, c.label));
   });
   lines.push('');
   lines.push('（やめる場合は「やめる」）');
@@ -1178,7 +1205,8 @@ function undoLast_() {
     if (row > sh.getLastRow()) return;
     names.push(withDate_(
       sh.getRange(row, COL.NAME).getValue(),
-      normalizeYmd_(sh.getRange(row, COL.DATE).getValue())
+      normalizeYmd_(sh.getRange(row, COL.DATE).getValue()),
+      sh.getRange(row, COL.LABEL).getValue()
     ));
     sh.getRange(row, COL.STATUS)
       .setValue(op.type === 'register' ? STATUS.CANCELED : STATUS.STOCK);
