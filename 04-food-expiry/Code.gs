@@ -251,17 +251,81 @@ function parseCommand_(text) {
   return { action: action, rest: (m[2] || '').trim() };
 }
 
+// 品名の区切り。これがあればユーザー自身が分けているので、そのまま切ってよい
+var NAME_DELIM = /[と、，,・\s　]/;
+
+// 区切りのない文字列がこの長さ以上なら、品名が続いている疑いがあるとみなす。
+// 「牛乳コチュジャンプロテイン」を1品と誤解しないため。単品でも長い名前
+// （「ブルガリアヨーグルト」など）は解析側が1品と返すので、害はなく費用だけ。
+var RUNON_MIN_LENGTH = 7;
+
+/**
+ * 自前で品名に切ってよいかを判断する。切ってよければ配列、迷うなら null。
+ * null のときは呼び出し側が Claude の解析に回す。
+ */
+function splitNamesSafely_(text) {
+  var names = splitNames_(text);
+  if (!names) return null;
+  if (NAME_DELIM.test(text)) return names;                // 区切りがある
+  return text.length < RUNON_MIN_LENGTH ? names : null;   // 短ければ単品とみなす
+}
+
+/**
+ * 「牛乳コチュジャンプロテイン」のように区切りなしで並べられた品名を、
+ * 既知の品名リストで切り分ける。全体を過不足なく覆えたときだけ採用する。
+ * リストが手がかりになるので、Claude を呼ばずに正確に切れる。
+ */
+function tileByNames_(text, names) {
+  var keys = names
+    .map(function (n) { return { raw: n, key: normalizeName_(n) }; })
+    .filter(function (e) { return e.key; })
+    .sort(function (a, b) { return b.key.length - a.key.length; });  // 長いものから当てる
+
+  var rest = normalizeName_(text);
+  var out = [];
+  while (rest) {
+    var hit = null;
+    for (var i = 0; i < keys.length; i++) {
+      if (rest.indexOf(keys[i].key) === 0) { hit = keys[i]; break; }
+    }
+    if (!hit) return null;   // 覆いきれない。判断は解析側に任せる
+    out.push(hit.raw);
+    rest = rest.substring(hit.key.length);
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * Claude に渡すときは操作が分かる言い回しに戻す。
+ * 品名だけを渡すと intent が unknown と判定され、items が空で返ることがあるため。
+ */
+var COMMAND_RESTATE = {
+  register: function (s) { return s; },
+  consume: function (s) { return s + 'を使った'; },
+  discard: function (s) { return s + 'を捨てた'; },
+  shop_add: function (s) { return '買い物リストに' + s + 'を追加'; },
+  shop_bought: function (s) { return s + 'を買った'; }
+};
+
 /**
  * 接頭辞で種別が確定した入力を処理する。
  * 品名だけで済むものは Claude を呼ばずにその場で片付け、
- * 個数や日付が混じるものだけ解析に回す（intent は使わず、押されたボタンを優先する）。
+ * 区切りがなく切り分けに迷うものだけ解析に回す
+ * （intent は使わず、押されたボタンを優先する）。
  */
 function runCommand_(cmd) {
   if (!cmd.rest) return COMMAND_HINTS[cmd.action];
 
+  // 削除はリストにある品名が手がかりになる。区切りがなくても正確に切れる
+  if (cmd.action === 'shop_bought') {
+    var todo = shopTodoRows_(shopSheet_()).map(function (t) { return t.name; });
+    var tiled = tileByNames_(cmd.rest, todo);
+    if (tiled) return shopBought_(tiled);
+  }
+
   // 買い物リストは品名だけなので API が要らない。空白も区切りとして扱う
   if (cmd.action === 'shop_add' || cmd.action === 'shop_bought') {
-    var names = splitNames_(cmd.rest);
+    var names = splitNamesSafely_(cmd.rest);
     if (names) {
       return cmd.action === 'shop_add' ? shopAdd_(names) : shopBought_(names);
     }
@@ -270,7 +334,7 @@ function runCommand_(cmd) {
   // 消費・破棄は取り違えると在庫が消えるので、空白を含む場合は自前で切らない。
   // 「明治 ブルガリアヨーグルト」を2品と誤解しないため。
   if ((cmd.action === 'consume' || cmd.action === 'discard') && !/[\s　]/.test(cmd.rest)) {
-    var simple = splitNames_(cmd.rest);
+    var simple = splitNamesSafely_(cmd.rest);
     if (simple) {
       return consumeItems_(
         simple.map(function (n) { return { item_name: n }; }),
@@ -278,7 +342,7 @@ function runCommand_(cmd) {
     }
   }
 
-  var result = parseTextExpiry_(cmd.rest);
+  var result = parseTextExpiry_(COMMAND_RESTATE[cmd.action](cmd.rest));
   var items = (result && result.items) || [];
   if (!items.length) {
     return cmd.action === 'register' ? TEXT_EMPTY_MESSAGE : '対象を読み取れませんでした。';
@@ -618,6 +682,9 @@ function buildTextPrompt_(text) {
     '- 「牛乳買った」          … 買ってきた → shop_bought（在庫への登録ではありません）',
     '- 「牛乳は9月10日」        … 期限を伝えている → register',
     'shop_add / shop_bought では品名だけを items に入れ、date は空文字にしてください。',
+    '買い物リストの品名も、区切りなしで続けて述べられることがあります。',
+    '例:「買い物リストに牛乳コチュジャンプロテインを追加」→ 牛乳／コチュジャン／プロテイン の3件。',
+    '1品の長い商品名（「ブルガリアヨーグルト」など）を無理に分割しないこと。',
     '',
     'consume / discard の場合は、対象の食材名だけを items に入れてください。',
     'その場合 date は空文字、found は false のままで構いません（日付が述べられていればその日付を入れてください）。',
