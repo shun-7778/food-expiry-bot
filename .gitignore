@@ -1,0 +1,27 @@
+# 既定ですべて除外し、公開してよいものだけを明示的に許可する。
+# この作業フォルダには業務ファイル（支払備金など）や私的な資料が同居しているため、
+# 「除外し忘れ」で流出しないよう、許可リスト方式にしている。
+*
+
+# --- 許可するもの ---
+!.gitignore
+!README.md
+
+# 食材賞味期限管理 LINE Bot
+!04-food-expiry/
+!04-food-expiry/**
+
+# レシピ在庫チェック
+!05-recipe-stock-check/
+!05-recipe-stock-check/**
+
+# Claude Code スキル定義
+!.claude/
+!.claude/skills/
+!.claude/skills/recipe-stock-check/
+!.claude/skills/recipe-stock-check/**
+
+# --- 許可の中でも除外するもの ---
+.claude/settings.local.json
+**/node_modules/
+**/.DS_Store
