@@ -10,6 +10,9 @@
 | `05-recipe-stock-check/` | レシピと在庫を突き合わせて買い物リストを作る仕組み |
 | `.claude/skills/recipe-stock-check/` | 上記を Claude Code から呼ぶためのスキル定義 |
 
+`04-food-expiry/.claspignore` は、clasp が GAS へ送るファイルを Bot 本体の
+3ファイルだけに限定している（`icons/*.html` などが混入しないように）。
+
 ## 動作の全体像
 
 ```
@@ -48,9 +51,28 @@
 [04-food-expiry/SETUP.md](04-food-expiry/SETUP.md) に、LINE チャネルの作成から
 週次トリガーの設定までの手順をまとめてある。
 
+## コードの反映
+
+`04-food-expiry/` はこのリポジトリが原本で、**実行される実体は Google Apps Script 側**。
+変更しただけでは動作は変わらない。
+
+`clasp`（Apps Script の公式CLI）を設定してあれば、次の2つで反映できる。
+
+```bash
+cd 04-food-expiry
+clasp push                              # コードを GAS へ
+clasp deploy -i <デプロイID> -d "説明"   # 新バージョンとして本番へ
+```
+
+**`push` だけでは LINE に反映されない。** ウェブアプリはデプロイし直すまで
+古いバージョンが動き続ける。
+
+初回の設定手順は [04-food-expiry/SETUP.md の付録](04-food-expiry/SETUP.md#付録-clasp-で反映を自動化する)
+にまとめてある。clasp を使わない場合は、GAS エディタに手で貼り直して
+「デプロイを管理 → 編集 → 新バージョン」でも同じことができる。
+
 ## 注意
 
-`04-food-expiry/Code.gs` はこのリポジトリが原本で、**実行される実体は Google Apps Script 側**。
-変更したら GAS エディタに貼り直し、新バージョンとしてデプロイする必要がある。
-
 API キーやアクセストークンはコードに含めず、GAS のスクリプトプロパティで管理している。
+clasp の認証情報（`~/.clasprc.json`）とプロジェクト設定（`.clasp.json`）も
+リポジトリには入れない。

@@ -405,3 +405,126 @@ python richmenu.py richmenu.png
 候補が複数あるときの番号選択と、重複登録の確認では、これまでどおり
 入力欄の上にボタン（Quick Reply）が出ます。こちらは**スマホのみ**で、
 PC版のLINEでは表示されません。リッチメニューは PC版でも表示されます。
+
+---
+
+---
+
+# 付録 clasp で反映を自動化する
+
+ここまでの手順では、`Code.gs` を直したら GAS エディタに手で貼り直していた。
+`clasp`（Apps Script の公式CLI）を入れると、**ローカルから `push` するだけ**になる。
+2,200行のファイルをコピペしなくてよくなり、貼り忘れ・部分貼り付けもなくなる。
+
+Claude Code に作業させている場合、`clasp push` まで実行させられるようになる。
+
+## 何が変わるか
+
+| | いままで | clasp 導入後 |
+|---|---|---|
+| コードの反映 | 全選択→GASエディタに貼り付け→保存 | `clasp push` |
+| 本番への反映 | デプロイ→デプロイを管理→編集→新バージョン→デプロイ | `clasp deploy -i <ID>` |
+| ファイルの追加 | エディタで手作業（`RichMenuImage` など） | `push` に含まれる |
+| 原本 | リポジトリ（ただし GAS 側と乖離しうる） | リポジトリ（構造的に一本化） |
+
+## 1. clasp を入れる（初回のみ）
+
+```bash
+npm install -g @google/clasp@3
+clasp --version   # 3.4.1 など
+```
+
+## 2. Apps Script API を有効にする（初回のみ）
+
+https://script.google.com/home/usersettings を開き、
+**「Google Apps Script API」を オン** にする。これを忘れると `push` が 403 で落ちる。
+
+## 3. ログインする（初回のみ）
+
+```bash
+clasp login
+```
+
+ブラウザが開いて Google の認証画面が出る。許可すると `~/.clasprc.json` に
+トークンが保存され、以後は聞かれない。
+
+> ブラウザが開けない環境（SSH 先など）では `clasp login --no-localhost` を使う。
+
+## 4. プロジェクトを紐づける（初回のみ）
+
+スクリプトIDは GAS エディタの **プロジェクトの設定 → スクリプト ID** で確認できる。
+URL（`https://script.google.com/home/projects/<ここ>/edit`）からも読める。
+
+```bash
+cd 04-food-expiry
+clasp clone <スクリプトID> --rootDir .
+```
+
+`.clasp.json` が作られる。**このファイルは `.gitignore` で除外済み**（スクリプトIDが
+入るため）。`clone` は GAS 側のファイルを落としてくるので、ローカルの `Code.gs` が
+上書きされていないか `git diff` で必ず確認すること。GAS 側が古ければ
+`git checkout 04-food-expiry/Code.gs` で戻してから `push` する。
+
+## 5. デプロイIDを控える（初回のみ）
+
+Webアプリの URL を変えずに更新するには、既存デプロイのIDが要る。
+
+```bash
+clasp list-deployments
+```
+
+`@1`, `@2`... と並ぶうち、**LINE の Webhook URL に対応するもの**の
+`AKfycb...` がそれ。GAS エディタの「デプロイを管理」でも確認できる。
+
+## 6. 日常の操作
+
+```bash
+cd 04-food-expiry
+
+clasp push                              # コードを GAS に反映（保存まで）
+clasp deploy -i <デプロイID> -d "説明"   # 新バージョンとして本番に反映
+```
+
+**`push` だけでは LINE に反映されない。** GAS のウェブアプリは、デプロイし直すまで
+古いバージョンが動き続ける。「直したのに直っていない」の原因はほぼこれ。
+
+| コマンド | 用途 |
+|---|---|
+| `clasp status` | 次の `push` で送られるファイルの確認 |
+| `clasp push` | コードを反映 |
+| `clasp push -w` | ファイル変更を監視して自動 push（開発中に便利） |
+| `clasp pull` | GAS 側で直接編集してしまったものを回収 |
+| `clasp deploy -i <ID> -d "..."` | 既存デプロイを新バージョンに更新 |
+| `clasp list-deployments` | デプロイの一覧とID |
+| `clasp open-script` | GAS エディタをブラウザで開く |
+| `clasp logs` | 実行ログの取得（下記の制約あり） |
+
+## 送られるファイルの範囲
+
+`.claspignore` で **`Code.gs` / `RichMenuImage.gs` / `appsscript.json` の3つだけ**に
+限定してある。これがないと clasp は `icons/*.html` も HTML ファイルとして
+GAS プロジェクトに送り込んでしまう。ファイルを増やしたら `.claspignore` にも追記すること。
+
+## できないこと・注意
+
+- **`clasp logs` はそのままでは使えないことがある。** Cloud Logging の参照には
+  標準GCPプロジェクトへの切り替えが必要。ログは GAS エディタの「実行数」画面で足りる。
+- **`clasp run`（関数の直接実行）は準備が重い。** 標準GCPプロジェクトへの切り替え、
+  `appsscript.json` への `oauthScopes` 明示、実行用APIデプロイが要る。
+  このBotは `doPost` のウェブアプリなので、動作確認は LINE から実際に送るのが早い。
+- **`push` は GAS 側の編集を上書きする。** GAS エディタで直接直したくなったら、
+  先に `clasp pull` で回収してからにする。
+- **`~/.clasprc.json` は秘密情報。** Google アカウントへのアクセストークンなので、
+  リポジトリにもクラウドにも置かない。ルートの `.gitignore` で除外済み。
+- トークンの期限が切れたら `clasp login` をやり直す。年に数回程度。
+
+## GitHub Actions で自動デプロイしない理由
+
+`~/.clasprc.json` を Secrets に入れれば push 契機の自動デプロイもできるが、
+個人利用では見合わないと判断している。
+
+- リフレッシュトークンは Google アカウント全体に効き、スコープも広い
+- main への push が即本番反映になり、デプロイ前の一拍（安全弁）がなくなる
+- clasp の CLI 仕様変更で workflow が黙って壊れる保守コストが乗る
+
+修正の頻度が上がって手動デプロイが律速になったら、そのとき入れればよい。
