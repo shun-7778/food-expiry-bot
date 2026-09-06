@@ -50,6 +50,7 @@ var COL_COUNT = 13;
 var HEADERS = ['登録日', '登録時刻', '食材名', '期限', '精度', 'ラベル', '確度',
   '入力元', '原文', '状態', '更新日時', '通知1M', '通知1W'];
 
+// DISCARDED は使わなくなったが、過去に記録した行が持っているので残す
 var STATUS = { STOCK: '在庫', USED: '消費済', DISCARDED: '破棄', CANCELED: '取消' };
 
 // ---------------------------------------------------------------- 買い物リスト定義
@@ -156,7 +157,6 @@ var HELP_MESSAGE = [
   '続けて中身を打って送ってください。',
   '　期限登録 牛乳 9月10日',
   '　使用済 牛乳',
-  '　破棄済 豆腐',
   '　買い物リスト追加 牛乳と卵',
   '　買い物リスト削除 牛乳',
   '種別が確定するので、取り違えが起きません。',
@@ -174,8 +174,8 @@ var HELP_MESSAGE = [
   '「牛乳を2個 9月11日」と個数を言えば確認しません。',
   '',
   '■ 使ったとき',
-  '「牛乳使った」「ヨーグルト食べた」',
-  '「豆腐捨てた」（破棄として記録）',
+  '「牛乳使った」「ヨーグルト食べた」「豆腐捨てた」',
+  'いずれも消費済として記録します。',
   '「片栗粉2つ捨てた」「牛乳全部使った」もまとめて可',
   '迷う候補があるときだけ番号で聞きます（例: 1,3）',
   '',
@@ -221,9 +221,9 @@ var COMMAND_WORDS = {
   '使用済': 'consume',
   '使った': 'consume',
   '消費': 'consume',
-  '破棄済': 'discard',
-  '捨てた': 'discard',
-  '破棄': 'discard',
+  '破棄済': 'consume',
+  '捨てた': 'consume',
+  '破棄': 'consume',
   '買い物リスト追加': 'shop_add',
   '買い物追加': 'shop_add',
   '買い物リスト削除': 'shop_bought',
@@ -235,7 +235,6 @@ var COMMAND_WORDS = {
 var COMMAND_HINTS = {
   register: '「期限登録 牛乳 9月10日」のように、食材名と期限を続けて送ってください。',
   consume: '「使用済 牛乳」のように、使った食材名を続けて送ってください。',
-  discard: '「破棄済 豆腐」のように、捨てた食材名を続けて送ってください。',
   shop_add: '「買い物リスト追加 牛乳と卵」のように、買うものを続けて送ってください。',
   shop_bought: '「買い物リスト削除 牛乳」のように、買ってきたものを続けて送ってください。'
 };
@@ -264,14 +263,14 @@ function runShopCommand_(action, text) {
   return action === 'shop_add' ? shopAdd_(names) : shopBought_(names);
 }
 
-/** 在庫から消す食材を Claude に特定させ、消費または破棄として記録する */
-function runConsumeCommand_(disposed, text) {
+/** 在庫から消す食材を Claude に特定させ、消費として記録する */
+function runConsumeCommand_(text) {
   var items = parseItemNames_(text);
   if (!items.length) return '対象の食材を読み取れませんでした。';
 
   return consumeItems_(items.map(function (it) {
     return { item_name: it.name, quantity: it.quantity };
-  }), disposed);
+  }));
 }
 
 /**
@@ -284,8 +283,8 @@ function runCommand_(cmd) {
   if (cmd.action === 'shop_add' || cmd.action === 'shop_bought') {
     return runShopCommand_(cmd.action, cmd.rest);
   }
-  if (cmd.action === 'consume' || cmd.action === 'discard') {
-    return runConsumeCommand_(cmd.action === 'discard', cmd.rest);
+  if (cmd.action === 'consume') {
+    return runConsumeCommand_(cmd.rest);
   }
 
   var result = parseTextExpiry_(cmd.rest);
@@ -385,7 +384,7 @@ function handleText_(event, text) {
   if (fast) {
     try {
       replyText_(event.replyToken,
-        prefixReply_(note, runConsumeCommand_(fast.disposed, fast.text)));
+        prefixReply_(note, runConsumeCommand_(fast.text)));
       return;
     } catch (err) {
       console.error('消費処理に失敗: ' + err.stack);
@@ -418,9 +417,9 @@ function handleText_(event, text) {
       replyText_(event.replyToken, note + shopBought_(names));
       return;
     }
+    // 「捨てた」も消費として記録する。使ったか捨てたかで在庫の扱いは変わらない
     if (intent === 'consume' || intent === 'discard') {
-      replyText_(event.replyToken,
-        prefixReply_(note, consumeItems_(items, intent === 'discard')));
+      replyText_(event.replyToken, prefixReply_(note, consumeItems_(items)));
       return;
     }
     if (intent === 'register' && items.length) {
@@ -614,6 +613,7 @@ function buildTextPrompt_(text) {
     '- "register" … 食材の期限を登録しようとしている。例「豆乳は2027年2月21日」「納豆明日まで」',
     '- "consume"  … 食べた・使った・飲んだと報告している。例「牛乳使った」「ヨーグルト食べた」',
     '- "discard"  … 捨てた・処分したと報告している。例「豆腐捨てた」「傷んでたので処分した」',
+    '  consume と discard は在庫から消す点で同じ扱いになります。迷ったら consume で構いません。',
     '- "shop_add"    … 買い物リストに入れたい。例「買い物リストに牛乳と卵を追加」「パン買っておきたい」',
     '- "shop_bought" … 買ってきたのでリストから外す。例「牛乳買った」「卵は買えた」',
     '- "shop_clear"  … 買い物リストを空にする。例「買い物リスト全部消して」',
@@ -1278,7 +1278,7 @@ function stockKeySet_(sh) {
  * 「牛乳使った」等に対応して在庫を消す。
  * 同名が複数あるときは期限が近いものを1件だけ対象にする。
  */
-function consumeItems_(items, disposed) {
+function consumeItems_(items) {
   if (!items.length) return '対象の食材を読み取れませんでした。';
 
   var sh = sheet_();
@@ -1286,7 +1286,6 @@ function consumeItems_(items, disposed) {
   if (last < 2) return '在庫がまだありません。';
 
   var data = sh.getRange(2, 1, last - 1, COL_COUNT).getValues();
-  var newStatus = disposed ? STATUS.DISCARDED : STATUS.USED;
   var stamp = nowStamp_();
 
   // 在庫だけを行番号つきで取り出す
@@ -1304,7 +1303,6 @@ function consumeItems_(items, disposed) {
 
   // この一連のやり取りの状態。候補が複数あるものは queue に積んで質問する
   var session = {
-    action: disposed ? 'discard' : 'consume',
     changed: [], done: [], missed: [], queue: []
   };
   var unresolved = [];
@@ -1355,10 +1353,10 @@ function consumeItems_(items, disposed) {
   return finishSession_(sh, session);
 }
 
-/** 対象行を消費済み（または破棄）にして、返信用の1行を積む */
+/** 対象行を消費済みにして、返信用の1行を積む */
 function markRow_(sh, choice, session) {
   sh.getRange(choice.row, COL.STATUS)
-    .setValue(session.action === 'discard' ? STATUS.DISCARDED : STATUS.USED);
+    .setValue(STATUS.USED);
   sh.getRange(choice.row, COL.UPDATED).setValue(nowStamp_());
   session.changed.push(choice.row);
   session.done.push(withDate_(choice.name, choice.date, choice.label));
@@ -1399,19 +1397,18 @@ function advanceQueue_(sh, session) {
       continue;
     }
 
-    return formatQuestion_(q, session.action);
+    return formatQuestion_(q);
   }
   return null;
 }
 
-function formatQuestion_(q, action) {
+function formatQuestion_(q) {
   var need = q.need || 1;
-  var verb = action === 'discard' ? '破棄' : '消費';
 
   var lines = ['「' + q.said + '」に該当する在庫が ' + q.choices.length + '件あります。'];
   lines.push(need > 1
-    ? verb + 'した ' + need + '件を、番号をカンマ区切りで答えてください。（例: 1,3）'
-    : verb + 'したものを番号で答えてください。');
+    ? '消費した ' + need + '件を、番号をカンマ区切りで答えてください。（例: 1,3）'
+    : '消費したものを番号で答えてください。');
   lines.push('');
 
   q.choices.forEach(function (c, i) {
@@ -1438,8 +1435,7 @@ function formatQuestion_(q, action) {
 function buildSessionReport_(session, isFinal) {
   var lines = [];
   if (session.done.length) {
-    lines.push((session.action === 'discard' ? '破棄' : '消費')
-      + 'として記録しました（' + session.done.length + '件）');
+    lines.push('消費として記録しました（' + session.done.length + '件）');
     lines.push('');
     session.done.forEach(function (d, i) { lines.push((i + 1) + '. ' + d); });
   }
@@ -1551,8 +1547,8 @@ function isCancelWord_(text) {
 
 // ---------------------------------------------------------------- API を使わない近道
 
-var USED_VERB = /^(.{1,14}?)(?:を|は)?(使った|使いました|つかった|食べた|たべた|食べました|飲んだ|のんだ|飲みました|消費した|開けた)$/;
-var DISCARD_VERB = /^(.{1,14}?)(?:を|は)?(捨てた|すてた|捨てました|処分した|廃棄した|だめにした)$/;
+// 「捨てた」も在庫から消す点は同じなので、消費と分けずに1つにまとめている
+var USED_VERB = /^(.{1,14}?)(?:を|は)?(使った|使いました|つかった|食べた|たべた|食べました|飲んだ|のんだ|飲みました|消費した|開けた|捨てた|すてた|捨てました|処分した|廃棄した|だめにした)$/;
 
 var SHOP_LIST_CMD = /^(買い物リスト|買物リスト|買うもの|買い物)$/;
 var SHOP_CLEAR_CMD = /^買い?物リスト(を)?(全部|すべて|全て|ぜんぶ)?(削除|消して|消す|クリア|リセット|空に)(して|する)?$/;
@@ -1571,23 +1567,15 @@ function parseShopAddFast_(text) {
 }
 
 /**
- * 「牛乳使った」「豆腐捨てた」形式かどうかを判定し、
- * 消費か破棄かと、食材名の部分を返す。
- * 品名の切り分けは Claude に任せるので、ここでは種別だけ決める。
+ * 「牛乳使った」「豆腐捨てた」形式かどうかを判定し、食材名の部分を返す。
+ * 品名の切り分けは Claude に任せるので、ここでは形だけ見る。
  */
 function parseConsumeFast_(text) {
-  var t = String(text).replace(/[。、．，.,!！]/g, '').trim();
-
-  var m = t.match(USED_VERB);
-  var disposed = false;
-  if (!m) {
-    m = t.match(DISCARD_VERB);
-    disposed = true;
-  }
+  var m = String(text).replace(/[。、．，.,!！]/g, '').trim().match(USED_VERB);
   if (!m) return null;
 
   var name = m[1].trim();
-  return name ? { disposed: disposed, text: name } : null;
+  return name ? { text: name } : null;
 }
 
 /**
@@ -1610,7 +1598,7 @@ function resolvePending_(selection) {
     var bad = selection.filter(function (n) { return n < 1 || n > q.choices.length; });
     if (bad.length) {
       savePending_(session);
-      var question = formatQuestion_(q, session.action);
+      var question = formatQuestion_(q);
       return {
         text: '1〜' + q.choices.length + ' の番号で答えてください。\n\n' + question.text,
         labels: question.labels
@@ -2034,8 +2022,8 @@ var RICHMENU_ROWS = [{ y: 0, h: 843 }, { y: 843, h: 843 }];
 var RICHMENU_CELLS = [
   { fill: '期限登録 ' },
   { fill: '使用済 ' },
-  { fill: '破棄済 ' },
   { send: '取消' },
+  { send: '在庫' },
   { fill: '買い物リスト追加 ' },
   { fill: '買い物リスト削除 ' },
   { send: '買い物リスト' },
