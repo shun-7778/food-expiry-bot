@@ -33,22 +33,23 @@ var SHEET_NAME = '在庫';
 
 // 列番号（1始まり）。順番を変えるときはヘッダーと合わせて直すこと。
 var COL = {
-  REGISTERED: 1,  // 登録日時
-  NAME: 2,        // 食材名
-  DATE: 3,        // 期限 (YYYY-MM-DD)
-  PRECISION: 4,   // day / month
-  LABEL: 5,       // 賞味期限 / 消費期限 / 不明
-  CONFIDENCE: 6,  // high / medium / low
-  SOURCE: 7,      // 写真 / テキスト
-  RAW: 8,         // 原文（写真の印字、または発話の該当部分）
-  STATUS: 9,      // 在庫 / 消費済 / 破棄 / 取消
-  UPDATED: 10,    // 状態を最後に変えた日時
-  NOTIFIED_1M: 11, // 残り1か月の通知を送った日
-  NOTIFIED_1W: 12  // 残り1週間の通知を送った日
+  REG_DATE: 1,    // 登録日 (YYYY-MM-DD)
+  REG_TIME: 2,    // 登録時刻 (HH:mm)
+  NAME: 3,        // 食材名
+  DATE: 4,        // 期限 (YYYY-MM-DD)
+  PRECISION: 5,   // day / month
+  LABEL: 6,       // 賞味期限 / 消費期限
+  CONFIDENCE: 7,  // high / medium / low
+  SOURCE: 8,      // 写真 / テキスト
+  RAW: 9,         // 原文（写真の印字、または発話の該当部分）
+  STATUS: 10,     // 在庫 / 消費済 / 破棄 / 取消
+  UPDATED: 11,    // 状態を最後に変えた日時
+  NOTIFIED_1M: 12, // 残り1か月の通知を送った日
+  NOTIFIED_1W: 13  // 残り1週間の通知を送った日
 };
-var COL_COUNT = 12;
+var COL_COUNT = 13;
 
-var HEADERS = ['登録日時', '食材名', '期限', '精度', 'ラベル', '確度',
+var HEADERS = ['登録日', '登録時刻', '食材名', '期限', '精度', 'ラベル', '確度',
   '入力元', '原文', '状態', '更新日時', '通知1M', '通知1W'];
 
 var STATUS = { STOCK: '在庫', USED: '消費済', DISCARDED: '破棄', CANCELED: '取消' };
@@ -610,9 +611,58 @@ function setupSpreadsheet() {
   sh.setFrozenRows(1);
   // 期限が日付型に自動変換されると扱いにくいので、文字列のまま保持する
   sh.getRange(2, COL.DATE, sh.getMaxRows() - 1, 1).setNumberFormat('@');
+  // 「12:55」が時刻値に変換されると読み戻しが面倒になるので文字列で保つ
+  sh.getRange(2, COL.REG_TIME, sh.getMaxRows() - 1, 1).setNumberFormat('@');
 
   PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', ss.getId());
   console.log('作成しました: ' + ss.getUrl());
+}
+
+/**
+ * 「登録日時」1列だったシートを「登録日」「登録時刻」の2列に分ける。
+ * エディタから1回だけ実行する。実行前にシートを複製してバックアップを残す。
+ * すでに移行済みなら何もしない。
+ */
+function migrateSplitRegisteredAt() {
+  var sh = sheet_();
+  var header = sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 2)).getValues()[0];
+
+  if (header[0] === '登録日' && header[1] === '登録時刻') {
+    console.log('移行済みです。何もしません。');
+    return;
+  }
+  if (header[0] !== '登録日時') {
+    throw new Error('想定外のヘッダーです（1列目=「' + header[0] + '」）。手動で確認してください。');
+  }
+
+  // 上書きする前にバックアップを取る
+  var ss = sh.getParent();
+  var backupName = '在庫_backup_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmm');
+  sh.copyTo(ss).setName(backupName);
+  console.log('バックアップを作成しました: ' + backupName);
+
+  sh.insertColumnAfter(1);
+  sh.getRange(1, 1, 1, 2).setValues([['登録日', '登録時刻']]).setFontWeight('bold');
+
+  var last = sh.getLastRow();
+  if (last >= 2) {
+    var src = sh.getRange(2, 1, last - 1, 1).getValues();
+    var out = src.map(function (r) {
+      var v = r[0];
+      if (v instanceof Date) {
+        return [Utilities.formatDate(v, 'Asia/Tokyo', 'yyyy-MM-dd'),
+                Utilities.formatDate(v, 'Asia/Tokyo', 'HH:mm')];
+      }
+      var s = String(v || '').trim();
+      if (!s) return ['', ''];
+      var m = s.match(/^(\d{4}-\d{2}-\d{2})[ T]?(\d{1,2}:\d{2})?/);
+      return m ? [m[1], m[2] || ''] : [s, ''];
+    });
+    sh.getRange(2, COL.REG_TIME, out.length, 1).setNumberFormat('@');
+    sh.getRange(2, 1, out.length, 2).setValues(out);
+  }
+
+  console.log('移行しました。' + Math.max(last - 1, 0) + '行を「登録日」「登録時刻」に分割しました。');
 }
 
 /** Date でも文字列でも 'YYYY-MM-DD' に揃える */
@@ -629,6 +679,14 @@ function normalizeName_(s) {
 
 function nowStamp_() {
   return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+}
+
+function todayStamp_() {
+  return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+}
+
+function timeStamp_() {
+  return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm');
 }
 
 /**
@@ -693,7 +751,8 @@ function appendRows_(sh, items, source) {
 
   var values = items.map(function (it) {
     var row = new Array(COL_COUNT).fill('');
-    row[COL.REGISTERED - 1] = stamp;
+    row[COL.REG_DATE - 1] = todayStamp_();
+    row[COL.REG_TIME - 1] = timeStamp_();
     row[COL.NAME - 1] = it.item_name || '(名称不明)';
     row[COL.DATE - 1] = it.date;
     row[COL.PRECISION - 1] = it.date_precision || 'day';
