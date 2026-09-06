@@ -251,20 +251,25 @@ function parseCommand_(text) {
   return { action: action, rest: (m[2] || '').trim() };
 }
 
+/** 買い物リストの品名を Claude に特定させ、追加または削除する */
+function runShopCommand_(action, text) {
+  var names = parseItemNames_(text);
+  if (!names.length) return '品名を読み取れませんでした。';
+  return action === 'shop_add' ? shopAdd_(names) : shopBought_(names);
+}
+
 /**
  * 接頭辞で種別が確定した入力を処理する。
- * 品名だけで済むものは Claude を呼ばずにその場で片付け、
- * 個数や日付が混じるものだけ解析に回す（intent は使わず、押されたボタンを優先する）。
+ * intent は使わず、押されたボタンを優先する。
  */
 function runCommand_(cmd) {
   if (!cmd.rest) return COMMAND_HINTS[cmd.action];
 
-  // 買い物リストは品名だけなので API が要らない。空白も区切りとして扱う
+  // 買い物リストの品名は Claude に特定させる。
+  // 記号で切ると「とうふ」の「と」まで区切りとして落ちてしまい、
+  // 「牛乳コチュジャンプロテイン」のような区切りなしの並びも切れないため。
   if (cmd.action === 'shop_add' || cmd.action === 'shop_bought') {
-    var names = splitNames_(cmd.rest);
-    if (names) {
-      return cmd.action === 'shop_add' ? shopAdd_(names) : shopBought_(names);
-    }
+    return runShopCommand_(cmd.action, cmd.rest);
   }
 
   // 消費・破棄は取り違えると在庫が消えるので、空白を含む場合は自前で切らない。
@@ -285,13 +290,6 @@ function runCommand_(cmd) {
   }
 
   if (cmd.action === 'register') return registerItems_(items, 'テキスト');
-
-  if (cmd.action === 'shop_add' || cmd.action === 'shop_bought') {
-    var parsed = items.map(function (it) { return it.item_name; })
-      .filter(function (n) { return n; });
-    if (!parsed.length) return '品名を読み取れませんでした。';
-    return cmd.action === 'shop_add' ? shopAdd_(parsed) : shopBought_(parsed);
-  }
 
   return consumeItems_(items, cmd.action === 'discard');
 }
@@ -350,7 +348,8 @@ function handleText_(event, text) {
     return;
   }
 
-  // 買い物リストの操作は言い回しが定型なので、ほとんど API を使わずに処理できる
+  // 買い物リストの操作は言い回しが定型なので、種別の判定は API を使わずに済む。
+  // 品名の特定だけ Claude に任せる（runShopCommand_）
   if (SHOP_LIST_CMD.test(text)) {
     replyText_(event.replyToken, note + shopList_());
     return;
@@ -361,16 +360,23 @@ function handleText_(event, text) {
   }
   var shopAdd = parseShopAddFast_(text);
   if (shopAdd) {
-    replyText_(event.replyToken, note + shopAdd_(shopAdd));
+    try {
+      replyText_(event.replyToken, prefixReply_(note, runShopCommand_('shop_add', shopAdd)));
+    } catch (err) {
+      console.error('買い物リストへの追加に失敗: ' + err.stack);
+      replyText_(event.replyToken, note + '処理に失敗しました。\n' + err.message);
+    }
     return;
   }
   var bought = text.replace(/[。．!！]/g, '').trim().match(BOUGHT_VERB);
   if (bought) {
-    var boughtNames = splitNames_(bought[1]);
-    if (boughtNames) {
-      replyText_(event.replyToken, note + shopBought_(boughtNames));
-      return;
+    try {
+      replyText_(event.replyToken, prefixReply_(note, runShopCommand_('shop_bought', bought[1])));
+    } catch (err) {
+      console.error('買い物リストからの削除に失敗: ' + err.stack);
+      replyText_(event.replyToken, note + '処理に失敗しました。\n' + err.message);
     }
+    return;
   }
 
   // 「牛乳使った」のような単純な言い方は API を使わずに処理する
@@ -719,6 +725,62 @@ function parseTextExpiry_(text) {
   return callClaude_([
     { type: 'text', text: buildTextPrompt_(text) }
   ], TEXT_EXPIRY_SCHEMA, MODEL_TEXT);
+}
+
+var NAMES_SCHEMA = {
+  type: 'object',
+  properties: {
+    items: {
+      type: 'array',
+      description: '述べられた品名ごとに1要素。登場順に並べる',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '品名。個数・内容量・助詞は含めない' },
+          note: { type: 'string', description: '訂正や判断に迷った点を日本語で1文。なければ空文字' }
+        },
+        required: ['name', 'note'],
+        additionalProperties: false
+      }
+    }
+  },
+  required: ['items'],
+  additionalProperties: false
+};
+
+function buildNamesPrompt_(text) {
+  return [
+    '買い物リストに出し入れする品名を列挙してください。日付や期限は関係ありません。',
+    '',
+    '入力はスマートフォンの音声入力で作られている前提です。',
+    '区切りの記号がないまま品名が続けて並べられることがあります。',
+    '',
+    '- 例:「牛乳コチュジャンプロテイン」→ 牛乳／コチュジャン／プロテイン の3件',
+    '- 例:「牛乳と卵」→ 牛乳／卵 の2件。この「と」は助詞です',
+    '- 例:「とうふとうもろこし」→ とうふ／とうもろこし の2件。',
+    '  「と」は助詞のこともあれば品名の一部のこともあります。文字面で切らず、',
+    '  食品として意味の通る単位で切ってください。',
+    '- 1品の長い商品名を無理に分割しないこと。',
+    '  例:「ブルガリアヨーグルト」→ 1件。「エクストラバージンオリーブオイル」→ 1件',
+    '- 個数や内容量は name に含めないでください。例:「牛乳2本」→「牛乳」',
+    '- 明らかな音声誤認識は妥当な食品名に訂正し、note に理由を書いてください。',
+    '  例:「投入」→「豆乳」',
+    '- 品名として読み取れるものがなければ items を空の配列にしてください。',
+    '',
+    '--- 入力 ---',
+    text
+  ].join('\n');
+}
+
+/** 買い物リスト用に、文から品名だけを取り出す */
+function parseItemNames_(text) {
+  var result = callClaude_([
+    { type: 'text', text: buildNamesPrompt_(text) }
+  ], NAMES_SCHEMA, MODEL_TEXT);
+
+  return ((result && result.items) || [])
+    .map(function (it) { return String(it.name || '').trim(); })
+    .filter(function (n) { return n; });
 }
 
 /** Messages API を叩き、structured output の JSON を返す共通処理 */
@@ -1468,11 +1530,14 @@ function splitNames_(text) {
   return parts;
 }
 
-/** 「買い物リストに牛乳を追加」形式を Claude なしで解釈する */
+/**
+ * 「買い物リストに牛乳を追加」形式かどうかを判定し、品名の部分を返す。
+ * 種別の判定はここで済むので、Claude は品名の特定にだけ使う。
+ */
 function parseShopAddFast_(text) {
   var t = String(text).replace(/[。．!！]/g, '').trim();
   var m = t.match(SHOP_ADD_A) || t.match(SHOP_ADD_B);
-  return m ? splitNames_(m[1]) : null;
+  return m ? m[1].trim() : null;
 }
 
 /**
@@ -2005,6 +2070,29 @@ function deleteRichMenus() {
 }
 
 // ---------------------------------------------------------------- 動作確認用
+
+/**
+ * 品名の切り分けを確かめる。エディタから実行する。
+ * 区切りのない並びや、品名に「と」を含むものが正しく切れるか見るためのもの。
+ * シートには何も書かないので、何度実行しても副作用はない。
+ */
+function testItemNames() {
+  [
+    '牛乳コチュジャンプロテイン',
+    '牛乳と卵',
+    'とうふとうもろこし',
+    'ブルガリアヨーグルト',
+    'エクストラバージンオリーブオイル',
+    '牛乳2本と卵1パック',
+    '納豆とうふねぎ'
+  ].forEach(function (t) {
+    try {
+      console.log(t + '  ->  ' + JSON.stringify(parseItemNames_(t)));
+    } catch (err) {
+      console.log(t + '  ->  *** ' + err.message + ' ***');
+    }
+  });
+}
 
 /** エディタから実行して、プロパティ設定と Claude API 疎通を確認する */
 function testConfig() {
