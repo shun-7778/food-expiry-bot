@@ -34,24 +34,28 @@ var COL = {
   REG_DATE: 1,    // 登録日 (YYYY-MM-DD)
   REG_TIME: 2,    // 登録時刻 (HH:mm)
   NAME: 3,        // 食材名
-  DATE: 4,        // 期限 (YYYY-MM-DD)
-  PRECISION: 5,   // day / month
-  LABEL: 6,       // 賞味期限 / 消費期限
-  CONFIDENCE: 7,  // high / medium / low
-  SOURCE: 8,      // 写真 / テキスト
-  RAW: 9,         // 原文（写真の印字、または発話の該当部分）
-  STATUS: 10,     // 在庫 / 消費済 / 破棄 / 取消
-  UPDATED: 11,    // 状態を最後に変えた日時
-  NOTIFIED_1M: 12, // 残り1か月の通知を送った日
-  NOTIFIED_1W: 13  // 残り1週間の通知を送った日
+  CATEGORY: 4,    // 区分（CATEGORIES のいずれか）
+  DATE: 5,        // 期限 (YYYY-MM-DD)
+  PRECISION: 6,   // day / month
+  LABEL: 7,       // 賞味期限 / 消費期限
+  CONFIDENCE: 8,  // high / medium / low
+  SOURCE: 9,      // 写真 / テキスト
+  RAW: 10,        // 原文（写真の印字、または発話の該当部分）
+  STATUS: 11,     // 在庫 / 消費済 / 破棄 / 取消
+  UPDATED: 12,    // 状態を最後に変えた日時
+  NOTIFIED_1M: 13, // 残り1か月の通知を送った日
+  NOTIFIED_1W: 14  // 残り1週間の通知を送った日
 };
-var COL_COUNT = 13;
+var COL_COUNT = 14;
 
-var HEADERS = ['登録日', '登録時刻', '食材名', '期限', '精度', 'ラベル', '確度',
+var HEADERS = ['登録日', '登録時刻', '食材名', '区分', '期限', '精度', 'ラベル', '確度',
   '入力元', '原文', '状態', '更新日時', '通知1M', '通知1W'];
 
 // DISCARDED は使わなくなったが、過去に記録した行が持っているので残す
 var STATUS = { STOCK: '在庫', USED: '消費済', DISCARDED: '破棄', CANCELED: '取消' };
+
+// 食材の大区分。多いとClaudeの分類がブレるので7つに絞ってある
+var CATEGORIES = ['野菜・フルーツ', '肉・魚介', '卵・乳製品', '調味料', '主食・加工食品', '飲料・菓子', '日用品'];
 
 // ---------------------------------------------------------------- 買い物リスト定義
 
@@ -534,6 +538,7 @@ var ITEM_SCHEMA = {
   properties: {
     position: { type: 'string', description: '写真内の位置。例「左」「中央」「右奥」。1点しか写っていなければ空文字' },
     item_name: { type: 'string', description: 'ブランド名＋商品名のみ。内容量・型番・キャッチコピーは含めない。読み取れなければ空文字' },
+    category: { type: 'string', description: '区分。次のいずれか1つ: ' + CATEGORIES.join(' / ') },
     found: { type: 'boolean', description: 'この商品の期限表示を読み取れたか' },
     label: { type: 'string', description: '「賞味期限」か「消費期限」のいずれか。消費期限と印字されている場合のみ「消費期限」、それ以外は「賞味期限」' },
     date: { type: 'string', description: 'YYYY-MM-DD 形式。年月のみの表示ならその月の末日。読めなければ空文字' },
@@ -542,7 +547,7 @@ var ITEM_SCHEMA = {
     confidence: { type: 'string', description: '"high" | "medium" | "low"' },
     note: { type: 'string', description: '判断に迷った点があれば日本語で1文。なければ空文字' }
   },
-  required: ['position', 'item_name', 'found', 'label', 'date', 'date_precision', 'raw_text', 'confidence', 'note'],
+  required: ['position', 'item_name', 'category', 'found', 'label', 'date', 'date_precision', 'raw_text', 'confidence', 'note'],
   additionalProperties: false
 };
 
@@ -563,6 +568,7 @@ var TEXT_ITEM_SCHEMA = {
   type: 'object',
   properties: {
     item_name: { type: 'string', description: '食材名。明らかな音声誤認識は妥当な食材名に訂正する。内容量や型番は含めない' },
+    category: { type: 'string', description: '区分。次のいずれか1つ: ' + CATEGORIES.join(' / ') + '。intent が register のときだけ判定し、それ以外は空文字でよい' },
     quantity: { type: 'number', description: '個数。「2個買った」のように明示された場合のみその数。述べられていなければ 1' },
     found: { type: 'boolean', description: 'この食材の期限を特定できたか' },
     label: { type: 'string', description: '「賞味期限」か「消費期限」のいずれか。消費期限と明示された場合のみ「消費期限」、それ以外は「賞味期限」' },
@@ -572,7 +578,7 @@ var TEXT_ITEM_SCHEMA = {
     confidence: { type: 'string', description: '"high" | "medium" | "low"' },
     note: { type: 'string', description: '訂正した内容や判断に迷った点を日本語で1文。なければ空文字' }
   },
-  required: ['item_name', 'quantity', 'found', 'label', 'date', 'date_precision', 'raw_text', 'confidence', 'note'],
+  required: ['item_name', 'category', 'quantity', 'found', 'label', 'date', 'date_precision', 'raw_text', 'confidence', 'note'],
   additionalProperties: false
 };
 
@@ -634,6 +640,11 @@ function buildTextPrompt_(text) {
     '',
     'register の場合は、以下に従って期限日を特定してください。',
     '',
+    '区分（category）について:',
+    '- register のときだけ、次の7つから1つを選んで category に入れてください: ' + CATEGORIES.join(' / '),
+    '- 迷ったときの目安: 豆腐・納豆・こんにゃくなどの日配品は「卵・乳製品」、乾物・缶詰・冷凍食品は「主食・加工食品」。',
+    '- register 以外の intent（consume / discard / shop_add など）では category は空文字にしてください。',
+    '',
     '入力文はスマートフォンの音声入力で作られている前提です。次の特徴を考慮してください。',
     '',
     '文の区切りについて:',
@@ -693,6 +704,10 @@ function buildPrompt_() {
     '- 例:「タカナシ 北海道純生クリーム35 100ml」→「タカナシ 純生クリーム」',
     '- 例:「おかめ納豆 極小粒 3P」→「おかめ納豆」',
     '- ただし種類を区別する語は残してください。例:「無調整豆乳」の「無調整」、「絹ごし豆腐」の「絹ごし」。',
+    '',
+    '区分（category）について:',
+    '- 次の7つから1つだけ選んでください: ' + CATEGORIES.join(' / '),
+    '- 迷ったときの目安: 豆腐・納豆・こんにゃくなどの日配品は「卵・乳製品」、乾物・缶詰・冷凍食品は「主食・加工食品」。',
     '',
     '複数商品について:',
     '- 写真に複数の食品が写っている場合は、1つも取りこぼさず items に1要素ずつ入れてください。',
@@ -943,6 +958,21 @@ function setupSpreadsheet() {
   console.log('作成しました: ' + ss.getUrl());
 }
 
+/**
+ * 「区分」列を追加するための一度きりの移行処理。
+ * 食材名（列3）の右に新しい列を挿入し、ヘッダー行を今の HEADERS に合わせて書き直す。
+ * 在庫データはクリア済み前提で、既存行の値は移し替えない。
+ * エディタから1回だけ実行する。
+ */
+function migrateAddCategoryColumn_() {
+  var sh = sheet_();
+  sh.insertColumnAfter(3);
+  sh.getRange(1, 1, 1, COL_COUNT).setValues([HEADERS]).setFontWeight('bold');
+  sh.getRange(2, COL.DATE, sh.getMaxRows() - 1, 1).setNumberFormat('@');
+  sh.getRange(2, COL.REG_TIME, sh.getMaxRows() - 1, 1).setNumberFormat('@');
+  console.log('区分列を追加しました。');
+}
+
 /** Date でも文字列でも 'YYYY-MM-DD' に揃える */
 function normalizeYmd_(v) {
   if (!v) return '';
@@ -1036,6 +1066,7 @@ function appendRows_(sh, items, source) {
     row[COL.REG_DATE - 1] = todayStamp_();
     row[COL.REG_TIME - 1] = timeStamp_();
     row[COL.NAME - 1] = it.item_name || '(名称不明)';
+    row[COL.CATEGORY - 1] = it.category || '';
     row[COL.DATE - 1] = it.date;
     row[COL.PRECISION - 1] = it.date_precision || 'day';
     row[COL.LABEL - 1] = normalizeLabel_(it.label);
