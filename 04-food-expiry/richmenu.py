@@ -136,9 +136,10 @@ CELLS = [
     # (col, row, 見出し, 2行目, アイコン, 背景, 前景)
     (0, 0, "期限登録", None,       icon_calendar, GREEN, GREEN_DARK),
     (1, 0, "使用済",   None,       icon_check,    GREEN, GREEN_DARK),
-    # 取消は在庫にも買い物リストにも効くので、どちらの色にも寄せない
-    (2, 0, "取消",     None,       icon_undo,     GRAY,  GRAY_DARK),
-    (3, 0, "在庫",     None,       icon_fridge,   GREEN, GREEN_DARK),
+    (2, 0, "在庫",     None,       icon_fridge,   GREEN, GREEN_DARK),
+    # 取消は在庫にも買い物リストにも効くので、どちらの色にも寄せない。
+    # 真下の「全削除」を押し間違えたときに、指を動かさず戻せる位置でもある
+    (3, 0, "取消",     None,       icon_undo,     GRAY,  GRAY_DARK),
     (0, 1, "買い物リスト", "追加",  lambda *a: icon_list(*a, mark="+"), BLUE, BLUE_DARK),
     (1, 1, "買い物リスト", "削除",  lambda *a: icon_list(*a, mark="-"), BLUE, BLUE_DARK),
     (2, 1, "買い物リスト", "表示",  icon_list,                          BLUE, BLUE_DARK),
