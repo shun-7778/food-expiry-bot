@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """リッチメニュー画像を生成する。既存 icons/ の配色（緑=在庫 / 紺=買い物リスト）に合わせる。"""
+import math
+
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 2500, 1686
-COLS = [(0, 833), (833, 834), (1667, 833)]   # (x, width) 合計 2500
+COLS = [(0, 625), (625, 625), (1250, 625), (1875, 625)]   # (x, width) 合計 2500
 ROWS = [(0, 843), (843, 843)]
 
 GREEN      = (47, 125, 92)     # #2F7D5C 在庫
@@ -11,12 +13,15 @@ GREEN_DARK = (30, 91, 65)      # #1E5B41
 BLUE       = (44, 76, 124)     # #2C4C7C 買い物リスト
 BLUE_DARK  = (32, 56, 92)
 ORANGE     = (224, 122, 62)    # #E07A3E アクセント
+GRAY       = (92, 99, 105)     # 取消。在庫にも買い物リストにも属さないので中間色
+GRAY_DARK  = (66, 72, 77)
+RED        = (166, 62, 56)     # 全削除。戻せるが影響が大きいので警告色
 WHITE      = (255, 255, 255)
 LINE       = (255, 255, 255)
 
 FONT = "C:/Windows/Fonts/YuGothB.ttc"
-label_font = ImageFont.truetype(FONT, 108, index=0)
-sub_font   = ImageFont.truetype(FONT, 66, index=0)
+label_font = ImageFont.truetype(FONT, 86, index=0)
+sub_font   = ImageFont.truetype(FONT, 52, index=0)
 
 img = Image.new("RGB", (W, H), WHITE)
 d = ImageDraw.Draw(img)
@@ -95,6 +100,36 @@ def icon_list(cx, cy, s, fg, bg, mark=None):
                                 radius=t, fill=ORANGE)
 
 
+def icon_undo(cx, cy, s, fg, bg):
+    """左へ戻る矢印＝取消"""
+    r = s * 0.38
+    lw = int(s * 0.15)
+    # 上side を開けた円弧。PIL の角度は 0=右, 90=下, 270=上
+    d.arc([cx - r, cy - r, cx + r, cy + r], start=300, end=600, fill=fg, width=lw)
+
+    # 円弧の左上の端に矢じりを置く
+    px = cx + r * math.cos(math.radians(240))
+    py = cy + r * math.sin(math.radians(240))
+    a = s * 0.21
+    d.polygon([(px - a * 1.05, py - a * 0.10),
+               (px + a * 0.35, py - a * 1.00),
+               (px + a * 0.55, py + a * 0.70)], fill=fg)
+
+
+def icon_clear(cx, cy, s, fg, bg):
+    """リストに × ＝買い物リストの全削除"""
+    icon_list(cx, cy, s, fg, bg)
+    w, h = s * 0.88, s
+    bx, by, br = cx + w * 0.46, cy + h * 0.42, s * 0.26
+    d.ellipse([bx - br, by - br, bx + br, by + br], fill=WHITE)
+    d.ellipse([bx - br * 0.84, by - br * 0.84, bx + br * 0.84, by + br * 0.84], fill=bg)
+    t = br * 0.15
+    for a, b in (((-1, -1), (1, 1)), ((-1, 1), (1, -1))):
+        d.line([(bx + a[0] * br * 0.36, by + a[1] * br * 0.36),
+                (bx + b[0] * br * 0.36, by + b[1] * br * 0.36)],
+               fill=WHITE, width=int(t * 2.4))
+
+
 # ---------------------------------------------------------------- 配置
 
 CELLS = [
@@ -102,9 +137,13 @@ CELLS = [
     (0, 0, "期限登録", None,       icon_calendar, GREEN, GREEN_DARK),
     (1, 0, "使用済",   None,       icon_check,    GREEN, GREEN_DARK),
     (2, 0, "破棄済",   None,       icon_trash,    GREEN, GREEN_DARK),
+    # 取消は在庫にも買い物リストにも効くので、どちらの色にも寄せない
+    (3, 0, "取消",     None,       icon_undo,     GRAY,  GRAY_DARK),
     (0, 1, "買い物リスト", "追加",  lambda *a: icon_list(*a, mark="+"), BLUE, BLUE_DARK),
     (1, 1, "買い物リスト", "削除",  lambda *a: icon_list(*a, mark="-"), BLUE, BLUE_DARK),
     (2, 1, "買い物リスト", "表示",  icon_list,                          BLUE, BLUE_DARK),
+    # 全削除は取消で戻せるが影響が大きいので、押す前に気づけるよう色を変える
+    (3, 1, "買い物リスト", "全削除", icon_clear,                        RED,  BLUE_DARK),
 ]
 
 for col, row, title, sub, icon, bg, fg in CELLS:
