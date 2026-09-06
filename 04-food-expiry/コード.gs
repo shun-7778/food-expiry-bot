@@ -964,7 +964,7 @@ function setupSpreadsheet() {
  * 在庫データはクリア済み前提で、既存行の値は移し替えない。
  * エディタから1回だけ実行する。
  */
-function migrateAddCategoryColumn_() {
+function migrateAddCategoryColumn() {
   var sh = sheet_();
   sh.insertColumnAfter(3);
   sh.getRange(1, 1, 1, COL_COUNT).setValues([HEADERS]).setFontWeight('bold');
