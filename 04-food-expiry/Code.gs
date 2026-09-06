@@ -253,45 +253,42 @@ function parseCommand_(text) {
 
 /** 買い物リストの品名を Claude に特定させ、追加または削除する */
 function runShopCommand_(action, text) {
-  var names = parseItemNames_(text);
-  if (!names.length) return '品名を読み取れませんでした。';
+  var items = parseItemNames_(text);
+  if (!items.length) return '品名を読み取れませんでした。';
+
+  var names = items.map(function (it) { return it.name; });
   return action === 'shop_add' ? shopAdd_(names) : shopBought_(names);
+}
+
+/** 在庫から消す食材を Claude に特定させ、消費または破棄として記録する */
+function runConsumeCommand_(disposed, text) {
+  var items = parseItemNames_(text);
+  if (!items.length) return '対象の食材を読み取れませんでした。';
+
+  return consumeItems_(items.map(function (it) {
+    return { item_name: it.name, quantity: it.quantity };
+  }), disposed);
 }
 
 /**
  * 接頭辞で種別が確定した入力を処理する。
- * intent は使わず、押されたボタンを優先する。
+ * 種別は押されたボタンで決まっているので、品名の特定だけを Claude に任せる。
  */
 function runCommand_(cmd) {
   if (!cmd.rest) return COMMAND_HINTS[cmd.action];
 
-  // 買い物リストの品名は Claude に特定させる。
-  // 記号で切ると「とうふ」の「と」まで区切りとして落ちてしまい、
-  // 「牛乳コチュジャンプロテイン」のような区切りなしの並びも切れないため。
   if (cmd.action === 'shop_add' || cmd.action === 'shop_bought') {
     return runShopCommand_(cmd.action, cmd.rest);
   }
-
-  // 消費・破棄は取り違えると在庫が消えるので、空白を含む場合は自前で切らない。
-  // 「明治 ブルガリアヨーグルト」を2品と誤解しないため。
-  if ((cmd.action === 'consume' || cmd.action === 'discard') && !/[\s　]/.test(cmd.rest)) {
-    var simple = splitNames_(cmd.rest);
-    if (simple) {
-      return consumeItems_(
-        simple.map(function (n) { return { item_name: n }; }),
-        cmd.action === 'discard');
-    }
+  if (cmd.action === 'consume' || cmd.action === 'discard') {
+    return runConsumeCommand_(cmd.action === 'discard', cmd.rest);
   }
 
   var result = parseTextExpiry_(cmd.rest);
   var items = (result && result.items) || [];
-  if (!items.length) {
-    return cmd.action === 'register' ? TEXT_EMPTY_MESSAGE : '対象を読み取れませんでした。';
-  }
+  if (!items.length) return TEXT_EMPTY_MESSAGE;
 
-  if (cmd.action === 'register') return registerItems_(items, 'テキスト');
-
-  return consumeItems_(items, cmd.action === 'discard');
+  return registerItems_(items, 'テキスト');
 }
 
 function handleText_(event, text) {
@@ -379,12 +376,12 @@ function handleText_(event, text) {
     return;
   }
 
-  // 「牛乳使った」のような単純な言い方は API を使わずに処理する
+  // 「牛乳使った」のような言い方も、種別は正規表現で決まる。品名だけ Claude に任せる
   var fast = parseConsumeFast_(text);
   if (fast) {
     try {
-      replyText_(event.replyToken, prefixReply_(note,
-        consumeItems_([{ item_name: fast.item_name }], fast.disposed)));
+      replyText_(event.replyToken,
+        prefixReply_(note, runConsumeCommand_(fast.disposed, fast.text)));
       return;
     } catch (err) {
       console.error('消費処理に失敗: ' + err.stack);
@@ -737,9 +734,10 @@ var NAMES_SCHEMA = {
         type: 'object',
         properties: {
           name: { type: 'string', description: '品名。個数・内容量・助詞は含めない' },
+          quantity: { type: 'number', description: '個数。述べられていなければ 1。「全部」は 99' },
           note: { type: 'string', description: '訂正や判断に迷った点を日本語で1文。なければ空文字' }
         },
-        required: ['name', 'note'],
+        required: ['name', 'quantity', 'note'],
         additionalProperties: false
       }
     }
@@ -750,7 +748,7 @@ var NAMES_SCHEMA = {
 
 function buildNamesPrompt_(text) {
   return [
-    '買い物リストに出し入れする品名を列挙してください。日付や期限は関係ありません。',
+    '述べられた食品名を列挙してください。日付や期限は関係ありません。',
     '',
     '入力はスマートフォンの音声入力で作られている前提です。',
     '区切りの記号がないまま品名が続けて並べられることがあります。',
@@ -762,25 +760,39 @@ function buildNamesPrompt_(text) {
     '  食品として意味の通る単位で切ってください。',
     '- 1品の長い商品名を無理に分割しないこと。',
     '  例:「ブルガリアヨーグルト」→ 1件。「エクストラバージンオリーブオイル」→ 1件',
-    '- 個数や内容量は name に含めないでください。例:「牛乳2本」→「牛乳」',
     '- 明らかな音声誤認識は妥当な食品名に訂正し、note に理由を書いてください。',
     '  例:「投入」→「豆乳」',
     '- 品名として読み取れるものがなければ items を空の配列にしてください。',
+    '',
+    '個数について:',
+    '- 個数や内容量は name に含めないでください。例:「牛乳2本」→ name「牛乳」',
+    '- 個数が述べられていれば quantity に入れてください。',
+    '  「2個」「2本」「2つ」「2パック」などが対象です。',
+    '  内容量（1リットル、400g）は個数ではないので quantity は 1 のままにしてください。',
+    '- 述べられていなければ quantity は 1 にしてください。',
+    '- 「全部」「すべて」と言われた場合は quantity を 99 にしてください。',
     '',
     '--- 入力 ---',
     text
   ].join('\n');
 }
 
-/** 買い物リスト用に、文から品名だけを取り出す */
+/**
+ * 文から食品名（と個数）を取り出す。
+ * 記号で切ると「とうふ」の「と」まで落ちてしまい、
+ * 「牛乳コチュジャンプロテイン」のような区切りなしの並びも切れないため、
+ * 品名の特定は Claude に任せている。
+ */
 function parseItemNames_(text) {
   var result = callClaude_([
     { type: 'text', text: buildNamesPrompt_(text) }
   ], NAMES_SCHEMA, MODEL_TEXT);
 
   return ((result && result.items) || [])
-    .map(function (it) { return String(it.name || '').trim(); })
-    .filter(function (n) { return n; });
+    .map(function (it) {
+      return { name: String(it.name || '').trim(), quantity: it.quantity };
+    })
+    .filter(function (it) { return it.name; });
 }
 
 /** Messages API を叩き、structured output の JSON を返す共通処理 */
@@ -1516,20 +1528,6 @@ var BOUGHT_VERB = /^(.{1,14}?)(?:を|は)?(買った|買いました|購入し�
 var SHOP_ADD_A = /^買い?物リスト(?:に|へ)(.+?)(?:を)?(?:追加|入れて|足して|加えて|メモ)(?:して|しといて|しておいて|とく)?$/;
 var SHOP_ADD_B = /^(.+?)(?:を)?買い?物リスト(?:に|へ)(?:追加|入れて|足して|加えて|メモ)(?:して|しといて|しておいて|とく)?$/;
 
-/** 「牛乳と卵」のような並びを品名の配列にする。日付が混ざるようなら null */
-function splitNames_(text) {
-  var parts = String(text).split(/[と、，,・\s]+/)
-    .map(function (s) { return s.replace(/^(も|の)/, '').trim(); })
-    .filter(function (s) { return s; });
-
-  if (!parts.length || parts.length > 10) return null;
-  for (var i = 0; i < parts.length; i++) {
-    if (parts[i].length > 20) return null;
-    if (/[0-9０-９]/.test(parts[i])) return null;  // 日付や数量が紛れている
-  }
-  return parts;
-}
-
 /**
  * 「買い物リストに牛乳を追加」形式かどうかを判定し、品名の部分を返す。
  * 種別の判定はここで済むので、Claude は品名の特定にだけ使う。
@@ -1541,10 +1539,9 @@ function parseShopAddFast_(text) {
 }
 
 /**
- * 「牛乳使った」のような単純な一文は、Claude を呼ばずにその場で解釈する。
- * 最頻の操作なので、ここを素通しできるとトークンが目に見えて減る。
- * 少しでも解釈に幅がある書き方（複数指定・日付つきなど）は null を返し、
- * これまでどおり Claude に任せる。
+ * 「牛乳使った」「豆腐捨てた」形式かどうかを判定し、
+ * 消費か破棄かと、食材名の部分を返す。
+ * 品名の切り分けは Claude に任せるので、ここでは種別だけ決める。
  */
 function parseConsumeFast_(text) {
   var t = String(text).replace(/[。、．，.,!！]/g, '').trim();
@@ -1558,14 +1555,7 @@ function parseConsumeFast_(text) {
   if (!m) return null;
 
   var name = m[1].trim();
-  if (!name) return null;
-
-  // 複数まとめて言われた場合や、日付・数量が混ざる場合は自前で解釈しない
-  if (/[とやも、,・\s]/.test(name)) return null;
-  if (/[0-9０-９]/.test(name)) return null;
-  if (/(昨日|今日|さっき|先ほど|全部|ぜんぶ)/.test(name)) return null;
-
-  return { disposed: disposed, item_name: name };
+  return name ? { disposed: disposed, text: name } : null;
 }
 
 /**
@@ -2078,16 +2068,21 @@ function deleteRichMenus() {
  */
 function testItemNames() {
   [
-    '牛乳コチュジャンプロテイン',
-    '牛乳と卵',
-    'とうふとうもろこし',
-    'ブルガリアヨーグルト',
+    '牛乳コチュジャンプロテイン',   // 区切りなしの並び
+    '牛乳と卵',                   // 「と」は助詞
+    'とうふとうもろこし',           // 「と」が品名の一部
+    '納豆とうふねぎ',
+    'ブルガリアヨーグルト',         // 単品。分割しないこと
     'エクストラバージンオリーブオイル',
-    '牛乳2本と卵1パック',
-    '納豆とうふねぎ'
+    '牛乳2本と卵1パック',          // 個数
+    '牛乳1リットル',               // 内容量は個数ではない
+    '片栗粉2つ',
+    '牛乳全部'                    // quantity=99
   ].forEach(function (t) {
     try {
-      console.log(t + '  ->  ' + JSON.stringify(parseItemNames_(t)));
+      console.log(t + '  ->  ' + parseItemNames_(t).map(function (it) {
+        return it.name + '×' + it.quantity;
+      }).join(' / '));
     } catch (err) {
       console.log(t + '  ->  *** ' + err.message + ' ***');
     }
