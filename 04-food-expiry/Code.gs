@@ -151,12 +151,14 @@ function handleEvent_(event) {
 var HELP_MESSAGE = [
   '使い方',
   '',
-  '■ ボタン（入力欄の上）',
-  '押すと入力欄に「登録 」などが入ります。',
+  '■ 下のメニュー',
+  '押すと入力欄に「期限登録 」などが入ります。',
   '続けて中身を打って送ってください。',
-  '　登録 牛乳 9月10日',
-  '　使った 牛乳',
-  '　買い物追加 牛乳と卵',
+  '　期限登録 牛乳 9月10日',
+  '　使用済 牛乳',
+  '　破棄済 豆腐',
+  '　買い物リスト追加 牛乳と卵',
+  '　買い物リスト削除 牛乳',
   '種別が確定するので、取り違えが起きません。',
   'これまでどおり接頭辞なしでも送れます。',
   '',
@@ -195,42 +197,43 @@ var TEXT_EMPTY_MESSAGE = '食材と期限を読み取れませんでした。\n�
 // ---------------------------------------------------------------- 接頭辞コマンド
 
 /**
- * 「登録 牛乳 9月10日」のように、先頭で操作を宣言してもらう形。
- * 常時ボタンとして出しておき、押すと fill が入力欄に差し込まれる（postback の
- * fillInText）。種別が確定するので intent の推定が要らなくなり、
- * 「牛乳買った（買い物リスト）」と「牛乳使った（在庫の消費）」の取り違えが起きない。
+ * 「期限登録 牛乳 9月10日」のように、先頭で操作を宣言してもらう形。
+ * リッチメニューを押すと接頭辞が入力欄に差し込まれる（postback の fillInText）。
+ * 種別が確定するので intent の推定が要らなくなり、「牛乳買った（買い物リスト）」と
+ * 「牛乳使った（在庫の消費）」の取り違えが起きない。
  *
  * 押しただけで送信されるわけではなく、続きを打って自分で送信する。
  * 接頭辞を消して送ることもできるので、従来どおりの自由入力も残る。
+ *
+ * ボタンの見出しと差し込む語は同じにしてある。トークに残る自分の発言と
+ * 押したボタンが一致するので、後から履歴を見て何をしたのか分かる。
+ *
+ * 接頭辞として認める語。リッチメニューが差し込む語のほかに、手打ちしそうな
+ * 言い方も拾う。RICHMENU_CELLS の語は必ずここに含めること（testConfig で検査）
  */
-var COMMAND_BUTTONS = [
-  { label: '期限登録', fill: '登録 ' },
-  { label: '使用した', fill: '使った ' },
-  { label: '破棄した', fill: '捨てた ' },
-  { label: '買い物リストに追加', fill: '買い物追加 ' },
-  { label: '買い物リストから削除', fill: '買った ' }
-];
-
-// 接頭辞として認める語。ボタンが差し込む語のほかに、手打ちしそうな言い方も拾う
 var COMMAND_WORDS = {
+  '期限登録': 'register',
   '登録': 'register',
+  '使用済': 'consume',
   '使った': 'consume',
   '消費': 'consume',
+  '破棄済': 'discard',
   '捨てた': 'discard',
   '破棄': 'discard',
-  '買い物追加': 'shop_add',
   '買い物リスト追加': 'shop_add',
+  '買い物追加': 'shop_add',
+  '買い物リスト削除': 'shop_bought',
   '買った': 'shop_bought',
   '購入': 'shop_bought'
 };
 
 // ボタンだけ押して中身を書かずに送られたときの案内
 var COMMAND_HINTS = {
-  register: '「登録 牛乳 9月10日」のように、食材名と期限を続けて送ってください。',
-  consume: '「使った 牛乳」のように、使った食材名を続けて送ってください。',
-  discard: '「捨てた 豆腐」のように、捨てた食材名を続けて送ってください。',
-  shop_add: '「買い物追加 牛乳と卵」のように、買うものを続けて送ってください。',
-  shop_bought: '「買った 牛乳」のように、買ってきたものを続けて送ってください。'
+  register: '「期限登録 牛乳 9月10日」のように、食材名と期限を続けて送ってください。',
+  consume: '「使用済 牛乳」のように、使った食材名を続けて送ってください。',
+  discard: '「破棄済 豆腐」のように、捨てた食材名を続けて送ってください。',
+  shop_add: '「買い物リスト追加 牛乳と卵」のように、買うものを続けて送ってください。',
+  shop_bought: '「買い物リスト削除 牛乳」のように、買ってきたものを続けて送ってください。'
 };
 
 /**
@@ -475,47 +478,32 @@ function prefixReply_(note, reply) {
 }
 
 /**
- * ボタン1つ分を組み立てる。指定のしかたで2種類ある。
- *   文字列        … 押すとその文字列がそのまま送信される（番号の選択など）
- *   {label, fill} … 押しても送信されず、fill が入力欄に入ってキーボードが開く。
- *                   続きを打って自分で送るため、接頭辞コマンドに使う。
+ * 候補の番号など、押すとその文字列がそのまま送信されるボタンを組み立てる。
+ * 常設のコマンドはリッチメニュー側に移したので、ここは質問への回答専用。
  */
-function quickReplyItem_(spec) {
-  if (typeof spec === 'string') {
-    return {
-      type: 'action',
-      action: { type: 'message', label: spec.substring(0, 20), text: spec }
-    };
-  }
-  return {
-    type: 'action',
-    action: {
-      type: 'postback',
-      label: spec.label.substring(0, 20),
-      data: 'fill',              // 使わないが postback には必須。doPost 側では無視される
-      inputOption: 'openKeyboard',
-      fillInText: spec.fill
-    }
-  };
-}
-
 function buildQuickReply_(labels) {
-  return { items: labels.slice(0, QUICK_REPLY_MAX).map(quickReplyItem_) };
+  return {
+    items: labels.slice(0, QUICK_REPLY_MAX).map(function (label) {
+      var s = String(label);
+      return {
+        type: 'action',
+        action: { type: 'message', label: s.substring(0, 20), text: s }
+      };
+    })
+  };
 }
 
 /**
  * 返信トークンで返す。reply は文字列または {text, labels}。
- * labels の指定がない返信には、既定として接頭辞コマンドのボタンを添える。
- * 出したくない場合は labels に空配列を渡す。
+ * ボタンは質問を返すときだけ付く（labels を指定した場合のみ）。
  */
 function replyText_(replyToken, reply) {
   if (!replyToken) return;
 
   var r = asReply_(reply);
-  var labels = r.labels || COMMAND_BUTTONS;
   var message = { type: 'text', text: r.text.substring(0, 4900) };
-  if (labels.length) {
-    message.quickReply = buildQuickReply_(labels);
+  if (r.labels && r.labels.length) {
+    message.quickReply = buildQuickReply_(r.labels);
   }
 
   var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', {
@@ -1711,12 +1699,7 @@ function pushText_(text) {
     headers: { Authorization: 'Bearer ' + prop_('LINE_CHANNEL_ACCESS_TOKEN', true) },
     payload: JSON.stringify({
       to: to,
-      // 通知を見てすぐ「捨てた 〇〇」と返せるよう、push にもボタンを添える
-      messages: [{
-        type: 'text',
-        text: text.substring(0, 4900),
-        quickReply: buildQuickReply_(COMMAND_BUTTONS)
-      }]
+      messages: [{ type: 'text', text: text.substring(0, 4900) }]
     }),
     muteHttpExceptions: true
   });
@@ -1914,6 +1897,113 @@ function shopList_() {
     + todo.map(function (t, i) { return (i + 1) + '. ' + t.name; }).join('\n');
 }
 
+// ---------------------------------------------------------------- リッチメニュー
+
+/**
+ * トーク下部に常設するメニュー。Quick Reply と違い常に見えていて、
+ * PC版のLINEでも表示される（Quick Reply は iOS/Android のみ）。
+ *
+ * 押すと fillInText が入力欄に入るだけで送信はされない。続きを打って自分で送る。
+ * ただし postback イベント自体は届くので、doPost 側では無視している
+ * （handleEvent_ が message 以外を早期 return する）。
+ */
+var RICHMENU_SIZE = { width: 2500, height: 1686 };
+
+// richmenu.png の格子と一致させること。列幅の合計は width と同じでなければならない
+var RICHMENU_COLS = [{ x: 0, w: 833 }, { x: 833, w: 834 }, { x: 1667, w: 833 }];
+var RICHMENU_ROWS = [{ y: 0, h: 843 }, { y: 843, h: 843 }];
+
+// 画像と同じ並び（左上から右へ、上段→下段）
+var RICHMENU_CELLS = [
+  { fill: '期限登録 ' },
+  { fill: '使用済 ' },
+  { fill: '破棄済 ' },
+  { fill: '買い物リスト追加 ' },
+  { fill: '買い物リスト削除 ' },
+  { send: '買い物リスト' }   // 一覧は入力するものがないのでそのまま送信する
+];
+
+function buildRichMenu_() {
+  return {
+    size: RICHMENU_SIZE,
+    selected: true,          // 友だち追加時から開いた状態にする
+    name: '食材在庫メニュー',
+    chatBarText: 'メニュー',
+    areas: RICHMENU_CELLS.map(function (cell, i) {
+      var c = RICHMENU_COLS[i % RICHMENU_COLS.length];
+      var r = RICHMENU_ROWS[Math.floor(i / RICHMENU_COLS.length)];
+      return {
+        bounds: { x: c.x, y: r.y, width: c.w, height: r.h },
+        action: cell.send
+          ? { type: 'message', text: cell.send }
+          : {
+            type: 'postback',
+            data: 'fill',   // 使わないが postback には必須
+            inputOption: 'openKeyboard',
+            fillInText: cell.fill
+          }
+      };
+    })
+  };
+}
+
+function lineApi_(method, url, options) {
+  var res = UrlFetchApp.fetch(url, Object.assign({
+    method: method,
+    headers: { Authorization: 'Bearer ' + prop_('LINE_CHANNEL_ACCESS_TOKEN', true) },
+    muteHttpExceptions: true
+  }, options || {}));
+
+  if (res.getResponseCode() !== 200) {
+    throw new Error('LINE API 失敗 (HTTP ' + res.getResponseCode() + ') ' + url + '\n'
+      + res.getContentText().substring(0, 300));
+  }
+  return res;
+}
+
+/**
+ * リッチメニューを作り直して既定に設定する。エディタから実行する。
+ * 画像や配置を変えたら、そのつど実行し直すこと。
+ * 古いものは消してから作るので、何度実行しても増えない。
+ */
+function setupRichMenu() {
+  var old = JSON.parse(lineApi_('get', 'https://api.line.me/v2/bot/richmenu/list').getContentText());
+  (old.richmenus || []).forEach(function (m) {
+    lineApi_('delete', 'https://api.line.me/v2/bot/richmenu/' + m.richMenuId);
+    console.log('古いリッチメニューを削除: ' + m.richMenuId);
+  });
+
+  var created = JSON.parse(lineApi_('post', 'https://api.line.me/v2/bot/richmenu', {
+    contentType: 'application/json',
+    payload: JSON.stringify(buildRichMenu_())
+  }).getContentText());
+  var id = created.richMenuId;
+  console.log('作成: ' + id);
+
+  var png = Utilities.newBlob(
+    Utilities.base64Decode(RICHMENU_IMAGE_BASE64), 'image/png', 'richmenu.png');
+  lineApi_('post', 'https://api-data.line.me/v2/bot/richmenu/' + id + '/content', {
+    contentType: 'image/png',
+    payload: png.getBytes()
+  });
+  console.log('画像をアップロード: ' + Math.round(png.getBytes().length / 1024) + 'KB');
+
+  lineApi_('post', 'https://api.line.me/v2/bot/user/all/richmenu/' + id);
+  console.log('既定のリッチメニューに設定しました。トークを開き直すと出ます。');
+}
+
+/** リッチメニューを全部消す。表示を止めたいときにエディタから実行する */
+function deleteRichMenus() {
+  var list = JSON.parse(lineApi_('get', 'https://api.line.me/v2/bot/richmenu/list').getContentText());
+  var menus = list.richmenus || [];
+  if (!menus.length) { console.log('リッチメニューはありません'); return; }
+
+  menus.forEach(function (m) {
+    lineApi_('delete', 'https://api.line.me/v2/bot/richmenu/' + m.richMenuId);
+    console.log('削除: ' + m.richMenuId);
+  });
+}
+
 // ---------------------------------------------------------------- 動作確認用
 
 /** エディタから実行して、プロパティ設定と Claude API 疎通を確認する */
@@ -1934,4 +2024,24 @@ function testConfig() {
     console.log(model + ': HTTP ' + res.getResponseCode()
       + (res.getResponseCode() === 200 ? ' OK' : ' / ' + res.getContentText().substring(0, 150)));
   });
+
+  // リッチメニューが差し込む語を COMMAND_WORDS に足し忘れると、
+  // 押しても普通の文として扱われてしまう。目に見えにくいのでここで検査する
+  RICHMENU_CELLS.forEach(function (cell, i) {
+    if (cell.send) {
+      console.log('メニュー' + (i + 1) + '「' + cell.send + '」: そのまま送信');
+      return;
+    }
+    var cmd = parseCommand_(cell.fill + 'テスト');
+    console.log('メニュー' + (i + 1) + '「' + cell.fill.trim() + '」: '
+      + (cmd ? cmd.action + ' OK' : '*** COMMAND_WORDS に未登録 ***'));
+  });
+
+  // 画像の格子とタップ領域がずれていないか
+  var areas = buildRichMenu_().areas;
+  var right = Math.max.apply(null, areas.map(function (a) { return a.bounds.x + a.bounds.width; }));
+  var bottom = Math.max.apply(null, areas.map(function (a) { return a.bounds.y + a.bounds.height; }));
+  console.log('リッチメニュー: ' + areas.length + '領域 / 右端' + right + ' 下端' + bottom
+    + (right === RICHMENU_SIZE.width && bottom === RICHMENU_SIZE.height
+      ? ' OK' : ' *** 画像サイズと不一致 ***'));
 }
