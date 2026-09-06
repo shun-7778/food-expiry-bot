@@ -153,7 +153,7 @@ var HELP_MESSAGE = [
   '使い方',
   '',
   '■ 下のメニュー',
-  '押すと入力欄に「期限登録 」などが入ります。',
+  '押すと入力欄に「期限登録」などが改行付きで入ります。',
   '続けて中身を打って送ってください。',
   '　期限登録 牛乳 9月10日',
   '　使用済 牛乳',
@@ -885,7 +885,7 @@ function formatItems_(items, header) {
 /**
  * 1件分を2行に整形する。
  *   1. ヨーグルト
- *     2026-09-17（11日）⚠
+ *   2026-09-17（11日）⚠
  * 末尾の ⚠ は、誤変換の訂正・言い直しの採用・年の補完などで
  * モデルの確度が high でなかったことを示す。理由は実行ログに残る。
  */
@@ -894,7 +894,7 @@ function formatItem_(it, prefix) {
   if (it.position) name += '［' + it.position + '］';
 
   if (!it.found || !it.date) {
-    return prefix + name + '\n  期限を特定できず ⚠';
+    return prefix + name + '\n期限を特定できず ⚠';
   }
 
   var days = daysLeft_(it.date);
@@ -902,7 +902,7 @@ function formatItem_(it, prefix) {
   var approx = it.date_precision === 'month' ? '頃' : '';
   var warn = it.confidence === 'high' ? '' : ' ⚠';
 
-  return prefix + name + '\n  ' + labelPrefix_(it.label) + it.date + approx
+  return prefix + name + '\n' + labelPrefix_(it.label) + it.date + approx
     + '（' + remain + '）' + warn;
 }
 
@@ -2022,13 +2022,13 @@ var RICHMENU_ROWS = [{ y: 0, h: 843 }, { y: 843, h: 843 }];
  *   send … 押すとそのまま送信される。続けて入力するものがない操作に使う
  */
 var RICHMENU_CELLS = [
-  { fill: '期限登録 ' },
-  { fill: '使用済 ' },
+  { fill: '期限登録\n' },
+  { fill: '使用済\n' },
   { send: '在庫' },
   // 真下の「全削除」を押し間違えたときに、指を動かさず戻せる位置に置く
   { send: '取消' },
-  { fill: '買い物リスト追加 ' },
-  { fill: '買い物リスト削除 ' },
+  { fill: '買い物リスト追加\n' },
+  { fill: '買い物リスト削除\n' },
   { send: '買い物リスト' },
   // 全削除は行を消さず「購入済」にするだけなので、押し間違えても「取消」で戻せる
   { send: '買い物リストを全部削除' }
