@@ -243,7 +243,6 @@ var HELP_MESSAGE = [
   '「買い物リストを全部削除」… 空にする',
   '',
   '■ コマンド',
-  '在庫 … 在庫の一覧',
   '取消 … 直前の登録・消費を取り消す',
   'id … あなたの userId を表示'
 ].join('\n');
@@ -385,11 +384,6 @@ function handleText_(event, text) {
     replyText_(event.replyToken, note + undoLast_());
     return;
   }
-  if (text === '在庫' || text === '一覧' || text === 'リスト') {
-    replyText_(event.replyToken, note + listStock_());
-    return;
-  }
-
   // 接頭辞で種別が宣言されていれば、推定せずそのとおりに処理する
   var cmd = parseCommand_(text);
   if (cmd) {
@@ -1839,20 +1833,6 @@ function undoShopping_(op) {
 }
 
 /** 在庫の一覧を返す */
-function listStock_() {
-  var sh = sheet_();
-  var last = sh.getLastRow();
-  if (last < 2) return '在庫はまだありません。';
-
-  var data = sh.getRange(2, 1, last - 1, COL_COUNT).getValues();
-  var items = data
-    .filter(function (row) { return row[COL.STATUS - 1] === STATUS.STOCK; })
-    .map(rowToItem_);
-
-  if (!items.length) return '在庫はありません。';
-  return formatItems_(items, '在庫 ' + items.length + '件');
-}
-
 // ---------------------------------------------------------------- 週次通知
 
 /**
@@ -2169,13 +2149,14 @@ var RICHMENU_ROWS = [{ y: 0, h: 843 }, { y: 843, h: 843 }];
 
 /**
  * 画像と同じ並び（左上から右へ、上段→下段）。
- *   fill … 押すと入力欄に差し込まれる。続きを打って自分で送る
- *   send … 押すとそのまま送信される。続けて入力するものがない操作に使う
+ *   fill       … 押すと入力欄に差し込まれる。続きを打って自分で送る
+ *   send       … 押すとそのまま送信される。続けて入力するものがない操作に使う
+ *   cameraRoll … 押すと写真選択画面が開く（レシピ写真を選んで送る用）
  */
 var RICHMENU_CELLS = [
   { fill: '期限登録\n' },
   { fill: '使用済\n' },
-  { send: '在庫' },
+  { cameraRoll: true }, // 材料確認: 開いた選択画面から選んだ写真がそのまま届く
   // 真下の「全削除」を押し間違えたときに、指を動かさず戻せる位置に置く
   { send: '取消' },
   { fill: '買い物リスト追加\n' },
@@ -2198,12 +2179,14 @@ function buildRichMenu_() {
         bounds: { x: c.x, y: r.y, width: c.w, height: r.h },
         action: cell.send
           ? { type: 'message', text: cell.send }
-          : {
-            type: 'postback',
-            data: 'fill',   // 使わないが postback には必須
-            inputOption: 'openKeyboard',
-            fillInText: cell.fill
-          }
+          : cell.cameraRoll
+            ? { type: 'cameraRoll', label: '材料確認' }
+            : {
+              type: 'postback',
+              data: 'fill',   // 使わないが postback には必須
+              inputOption: 'openKeyboard',
+              fillInText: cell.fill
+            }
       };
     })
   };
@@ -2321,6 +2304,10 @@ function testConfig() {
   RICHMENU_CELLS.forEach(function (cell, i) {
     if (cell.send) {
       console.log('メニュー' + (i + 1) + '「' + cell.send + '」: そのまま送信');
+      return;
+    }
+    if (cell.cameraRoll) {
+      console.log('メニュー' + (i + 1) + ': 写真選択画面を開く');
       return;
     }
     var cmd = parseCommand_(cell.fill + 'テスト');
