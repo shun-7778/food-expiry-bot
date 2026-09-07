@@ -1306,6 +1306,10 @@ function matchListByClaude_(names, rows, kind) {
       ? '- 商品名は写真から読み取った正式名称です。レシピの材料名は一般名・カテゴリ名で書かれています。'
       : '- 商品名は写真から読み取った正式名称です。ユーザーは略称・一般名・カテゴリ名で呼びます。');
     lines.push('  例:「ヨーグルト」→「ダノンビオ」、「コーヒー」→「ネスカフェ ゴールドブレンド」');
+    if (kind === 'recipe') {
+      lines.push('- 文字面が似ていても別の食材は別物として扱ってください。');
+      lines.push('  例:「ごま」と「ごま油」、「醤油」と「めんつゆ」、「小麦粉」と「片栗粉」はそれぞれ別物です。');
+    }
   } else {
     lines.push('- リストの品名はユーザー自身が入れたものです。略称や一般名で呼ばれることがあります。');
     lines.push('  例:「ヨーグルト」→「ブルガリアヨーグルト」');
@@ -1376,8 +1380,13 @@ function currentStockRows_() {
 
 /**
  * レシピの材料が在庫にあるかどうかで「買うべきもの」「家にあるもの」に振り分ける。
- * 数量は見ない（あるかないかだけ）。名前の突き合わせは第1段階を文字列一致、
- * 見つからなかったものだけ第2段階として意味でClaudeに照合させる（matchListByClaude_ を流用）。
+ * 数量は見ない（あるかないかだけ）。名前の突き合わせは第1段階を完全一致のみとし、
+ * それ以外は全部第2段階の意味照合（matchListByClaude_）に回す。
+ *
+ * 消費・買い物リストの突き合わせと違い、ここは部分一致（indexOf）を使わない。
+ * 「ごま」が「ごま油」に含まれるからといって同じ食材とは限らず、部分一致だと
+ * 別物を誤って「在庫にある」と判定してしまう。Claude の意味照合には元々
+ * 「似ているだけの別物で代用しない」という指示が入っているため、そちらに任せる。
  */
 function matchRecipeToStock_(items) {
   var stock = currentStockRows_();
@@ -1388,10 +1397,7 @@ function matchRecipeToStock_(items) {
 
   items.forEach(function (it) {
     var key = normalizeName_(it.item_name);
-    var hit = key && stock.some(function (s) {
-      var name = normalizeName_(s.name);
-      return name.indexOf(key) >= 0 || key.indexOf(name) >= 0;
-    });
+    var hit = key && stock.some(function (s) { return normalizeName_(s.name) === key; });
     if (hit) have.push(it); else unresolved.push(it);
   });
 
