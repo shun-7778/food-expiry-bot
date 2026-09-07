@@ -1,6 +1,7 @@
 /**
- * 食材の賞味期限リーダー（MVP①）
- * LINE に写真を送る → Claude Vision で賞味期限を読み取る → LINE で返信する
+ * 食材在庫・買い物リスト管理 Bot
+ * LINE にテキストで期限や消費を送る → Claude で解析 → 在庫を更新して返信する
+ * レシピの写真を送る → Claude Vision で材料を読み取り、在庫と突き合わせて返信する
  *
  * 前提: スクリプトプロパティに以下を設定しておくこと
  *   LINE_CHANNEL_ACCESS_TOKEN : LINE Developers の長期チャネルアクセストークン
@@ -10,7 +11,7 @@
 
 /**
  * タスクごとにモデルを分ける。
- *   写真の読み取り … 印字を読むぶん難度は高いが、Sonnet で足りる想定
+ *   レシピ写真の読み取り … 手書き・雑誌など読み取り対象が多様なぶん難度は高いが、Sonnet で足りる想定
  *   テキストの解析・在庫の突き合わせ … 易しいので最安の Haiku
  *
  * 単価（入力/出力 per MTok）と画像1枚あたりの目安:
@@ -99,9 +100,21 @@ function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents);
     var events = body.events || [];
-    for (var i = 0; i < events.length; i++) {
-      handleEvent_(events[i]);
+
+    // 写真は複数枚まとめて送られることがある。同じ webhook 呼び出しに
+    // 含まれる image イベントはまとめて1回のレシピ照合として扱う。
+    // 間を置いて送られた場合（別の webhook 呼び出しになる）はそれぞれ別の照合になる。
+    var imageEvents = events.filter(function (ev) {
+      return ev.type === 'message' && ev.message && ev.message.type === 'image' && isAllowedSender_(ev);
+    });
+    if (imageEvents.length) {
+      handleRecipeImages_(imageEvents);
     }
+
+    events.forEach(function (ev) {
+      if (imageEvents.indexOf(ev) >= 0) return; // 上でまとめて処理済み
+      handleEvent_(ev);
+    });
   } catch (err) {
     console.error('doPost failed: ' + err.stack);
   }
@@ -110,12 +123,17 @@ function doPost(e) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+/** ALLOWED_USER_ID が設定されていれば、そのユーザー以外からの投稿を弾く */
+function isAllowedSender_(event) {
+  var allowed = prop_('ALLOWED_USER_ID', false);
+  return !allowed || (event.source && event.source.userId === allowed);
+}
+
 function handleEvent_(event) {
   if (event.type !== 'message') return;
 
-  var allowed = prop_('ALLOWED_USER_ID', false);
-  if (allowed && event.source && event.source.userId !== allowed) {
-    console.warn('許可外のユーザーからの投稿を無視: ' + event.source.userId);
+  if (!isAllowedSender_(event)) {
+    console.warn('許可外のユーザーからの投稿を無視: ' + (event.source && event.source.userId));
     return;
   }
 
@@ -134,23 +152,49 @@ function handleEvent_(event) {
   }
 
   if (msg.type !== 'image') {
-    replyText_(event.replyToken, '写真か、テキストで期限を送ってください。');
+    replyText_(event.replyToken, 'レシピの写真か、テキストで送ってください。');
     return;
   }
 
+  // 通常ここには来ない（image は doPost 側でまとめて処理済み）。
+  // 万一単独で回ってきた場合のフォールバック。
+  handleRecipeImages_([event]);
+}
+
+/**
+ * レシピ写真（1枚以上）から材料を読み取り、在庫と突き合わせて返信する。
+ * 複数枚渡された場合は全部の材料をまとめてから重複を除き、1回だけ照合する。
+ * 返信は一番最後のイベントの replyToken で行い、他のイベントには返信しない
+ * （1件ずつ返信すると同じ内容が写真の枚数分届いてしまうため）。
+ */
+function handleRecipeImages_(events) {
+  clearPending_(); // 写真が来たら選択待ちは打ち切る
+  var replyToken = events[events.length - 1].replyToken;
+
   try {
-    clearPending_(); // 写真が来たら選択待ちは打ち切る
-    var image = fetchLineImage_(msg.id);
-    var result = extractExpiry_(image.base64, image.mimeType);
-    var items = (result && result.items) || [];
+    var seen = {};
+    var items = [];
+    events.forEach(function (ev) {
+      var image = fetchLineImage_(ev.message.id);
+      var result = extractRecipeItems_(image.base64, image.mimeType);
+      ((result && result.items) || []).forEach(function (it) {
+        if (!it.item_name) return;
+        var key = normalizeName_(it.item_name);
+        if (!key || seen[key]) return; // 複数枚にまたがる重複を除く
+        seen[key] = true;
+        items.push(it);
+      });
+    });
+
     if (!items.length) {
-      replyText_(event.replyToken, PHOTO_EMPTY_MESSAGE);
+      replyText_(replyToken, RECIPE_EMPTY_MESSAGE);
       return;
     }
-    replyText_(event.replyToken, registerItems_(items, '写真'));
+
+    replyText_(replyToken, matchRecipeToStock_(items));
   } catch (err) {
-    console.error('画像処理に失敗: ' + err.stack);
-    replyText_(event.replyToken, '読み取りに失敗しました。\n' + err.message);
+    console.error('レシピ照合に失敗: ' + err.stack);
+    replyText_(replyToken, '読み取りに失敗しました。\n' + err.message);
   }
 }
 
@@ -172,11 +216,15 @@ var HELP_MESSAGE = [
   '「取消」で戻せます。',
   '',
   '■ 登録',
-  '・賞味期限が写った写真を送る（複数商品まとめて可）',
   '・「豆乳は2027年2月21日 ヨーグルトは9月17日」と送る',
   '　「納豆は明日まで」のような言い方も可',
   '同じものが在庫にあると確認します。まとめ買いは',
   '「牛乳を2個 9月11日」と個数を言えば確認しません。',
+  '',
+  '■ レシピ照合',
+  'レシピの写真を送ると、材料を在庫と突き合わせて',
+  '「買うべきもの」「家にあるもの」を返します。',
+  '複数枚まとめて送ると1回の照合にまとめます。',
   '',
   '■ 使ったとき',
   '「牛乳使った」「ヨーグルト食べた」「豆腐捨てた」',
@@ -200,7 +248,7 @@ var HELP_MESSAGE = [
   'id … あなたの userId を表示'
 ].join('\n');
 
-var PHOTO_EMPTY_MESSAGE = '食品を検出できませんでした。\n商品と期限の印字が写るように撮り直してみてください。';
+var RECIPE_EMPTY_MESSAGE = '材料を検出できませんでした。\n材料欄がはっきり写るように撮り直してみてください。';
 var TEXT_EMPTY_MESSAGE = '食材と期限を読み取れませんでした。\n「豆乳は2027年2月21日」のように、食材名と日付を続けて送ってください。';
 
 // ---------------------------------------------------------------- 接頭辞コマンド
@@ -538,31 +586,24 @@ function replyText_(replyToken, reply) {
 
 // ---------------------------------------------------------------- Claude API
 
-var ITEM_SCHEMA = {
+var RECIPE_ITEM_SCHEMA = {
   type: 'object',
   properties: {
-    position: { type: 'string', description: '写真内の位置。例「左」「中央」「右奥」。1点しか写っていなければ空文字' },
-    item_name: { type: 'string', description: 'ブランド名＋商品名のみ。内容量・型番・キャッチコピーは含めない。読み取れなければ空文字' },
-    category: { type: 'string', description: '区分。次のいずれか1つ: ' + CATEGORIES.join(' / ') },
-    found: { type: 'boolean', description: 'この商品の期限表示を読み取れたか' },
-    label: { type: 'string', description: '「賞味期限」か「消費期限」のいずれか。消費期限と印字されている場合のみ「消費期限」、それ以外は「賞味期限」' },
-    date: { type: 'string', description: 'YYYY-MM-DD 形式。年月のみの表示ならその月の末日。読めなければ空文字' },
-    date_precision: { type: 'string', description: '"day" | "month" | "none"' },
-    raw_text: { type: 'string', description: '画像上の期限表示をそのまま書き写したもの' },
+    item_name: { type: 'string', description: '材料名。分量や下ごしらえの指示は含めない。書かれたままの表記でよい（変換しない）。読み取れなければ空文字' },
     confidence: { type: 'string', description: '"high" | "medium" | "low"' },
     note: { type: 'string', description: '判断に迷った点があれば日本語で1文。なければ空文字' }
   },
-  required: ['position', 'item_name', 'category', 'found', 'label', 'date', 'date_precision', 'raw_text', 'confidence', 'note'],
+  required: ['item_name', 'confidence', 'note'],
   additionalProperties: false
 };
 
-var EXPIRY_SCHEMA = {
+var RECIPE_SCHEMA = {
   type: 'object',
   properties: {
     items: {
       type: 'array',
-      description: '写真に写っている食品ごとに1要素。写真の左から右の順に並べる',
-      items: ITEM_SCHEMA
+      description: '材料欄に書かれている食材・調味料ごとに1要素',
+      items: RECIPE_ITEM_SCHEMA
     }
   },
   required: ['items'],
@@ -694,52 +735,33 @@ function buildTextPrompt_(text) {
   ].join('\n');
 }
 
-function buildPrompt_() {
-  var today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+function buildRecipePrompt_() {
   return [
-    '食品パッケージの写真から、写っているすべての商品について賞味期限または消費期限を読み取ってください。',
+    '料理レシピの写真から、材料欄に書かれている食材・調味料をすべて読み取ってください。',
     '',
-    '今日の日付は ' + today + '（日本時間）です。年が2桁の場合はこれを基準に西暦を補完してください。',
+    '対象外にするもの:',
+    '- 作り方の手順、コラム、広告など材料欄以外の文章',
+    '- ページ全体のタイトルや料理名（材料そのものではないため）',
     '',
-    '商品名（item_name）の書き方:',
-    '- ブランド名と商品名だけを簡潔に書き、それ以外は省いてください。目安は20文字以内です。',
-    '- 内容量（400g、100ml、1000ml、10個入、3P など）は含めないでください。',
-    '- 型番・記号・アルファベットの識別子（LB81、L01 など）は含めないでください。',
-    '- パッケージのキャッチコピーや成分の宣伝文句（「カルシウムと鉄分」「料理に最適」など）は含めないでください。',
-    '- 例:「明治ブルガリアヨーグルト LB81 カルシウムと鉄分 400g」→「明治ブルガリアヨーグルト」',
-    '- 例:「タカナシ 北海道純生クリーム35 100ml」→「タカナシ 純生クリーム」',
-    '- 例:「おかめ納豆 極小粒 3P」→「おかめ納豆」',
-    '- ただし種類を区別する語は残してください。例:「無調整豆乳」の「無調整」、「絹ごし豆腐」の「絹ごし」。',
+    '材料名（item_name）の書き方:',
+    '- 分量（大さじ1、200g、2個、少々 など）は含めないでください。',
+    '- 「みじん切り」「薄切り」「常温に戻す」などの下ごしらえの指示は含めないでください。',
+    '- 「A」「合わせ調味料」のようなグループ見出し自体は無視し、その中身の食材だけを列挙してください。',
+    '- 表記はレシピに書かれたままにしてください（かなを漢字にするなどの変換はしない）。',
     '',
-    '区分（category）について:',
-    '- 次の7つから1つだけ選んでください: ' + CATEGORIES.join(' / '),
-    '- 迷ったときの目安: 豆腐・納豆・こんにゃくなどの日配品は「卵・乳製品」、乾物・缶詰・冷凍食品は「主食・加工食品」。',
-    '',
-    '複数商品について:',
-    '- 写真に複数の食品が写っている場合は、1つも取りこぼさず items に1要素ずつ入れてください。',
-    '- 並び順は写真の左から右。position には「左」「中央」「右奥」のように、どれを指すか分かる位置を書いてください。',
-    '- ある商品の期限だけが読めない場合も、その商品を items から省かずに found を false で入れてください。',
-    '- 別の商品の期限を取り違えて割り当てないこと。どの印字がどの商品のものか自信がなければ confidence を "low" にしてください。',
-    '',
-    '日付の読み取りについて:',
-    '- 日本の食品では「25.09.06」「25 09 06」「2026.9」「26.09」「2027 02 21」などの表記が使われます。',
-    '- 年月のみの表示（例「2026.9」）は、その月の末日を date に入れ、date_precision を "month" にしてください。',
-    '- label は「消費期限」と印字されている場合のみ "消費期限"、それ以外はすべて "賞味期限" にしてください。',
-    '  ラベル文字が読み取れない場合も "賞味期限" にします。',
-    '  「消費期限」は過ぎたら食べない方がよいという意味なので、印字を慎重に確認してください。',
-    '- 製造日・ロット番号・製造所固有記号・バーコード・価格・内容量を期限と誤認しないこと。',
-    '  例:「26.09.14.K11」の K11、「26.09.17/+KA L01」の +KA L01、「2027 02 21 +KN/AAS132」の +KN/AAS132 は記号であり日付ではありません。',
-    '- インクジェット印字がかすれている、曲面で歪んでいるなど確信が持てない場合は confidence を "low" にし、note に理由を書いてください。',
-    '- どうしても読み取れない場合は found を false にし、date を空文字にしてください。推測で埋めないこと。'
+    '確信が持てない場合:',
+    '- 手書き文字がかすれている、印刷が不鮮明、複数の候補が考えられるなどで自信が持てない場合は',
+    '  confidence を "low" にし、note に理由を書いてください。',
+    '- 材料欄が見当たらない、または読み取れる食材が1つもない場合は items を空の配列にしてください。'
   ].join('\n');
 }
 
-/** Claude Vision に画像を投げて期限情報を JSON で取得する */
-function extractExpiry_(base64Image, mimeType) {
+/** Claude Vision に画像を投げてレシピの材料一覧を JSON で取得する */
+function extractRecipeItems_(base64Image, mimeType) {
   return callClaude_([
     { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
-    { type: 'text', text: buildPrompt_() }
-  ], EXPIRY_SCHEMA, MODEL_VISION);
+    { type: 'text', text: buildRecipePrompt_() }
+  ], RECIPE_SCHEMA, MODEL_VISION);
 }
 
 /** テキスト（音声入力を含む）を解析して期限情報を JSON で取得する */
@@ -1261,25 +1283,28 @@ var LIST_MATCH_SCHEMA = {
  * rows は {row, name} の配列。在庫の場合は date も持たせる。
  */
 function matchListByClaude_(names, rows, kind) {
-  var isStock = kind === 'stock';
+  var isStock = kind === 'stock' || kind === 'recipe';
   var lines = [];
 
-  lines.push(isStock
-    ? 'ユーザーが「使った」「捨てた」と言った食材が、在庫リストのどれを指すか特定してください。'
-    : 'ユーザーが「買った」と言った品物が、買い物リストのどれを指すか特定してください。');
+  lines.push(
+    kind === 'stock' ? 'ユーザーが「使った」「捨てた」と言った食材が、在庫リストのどれを指すか特定してください。'
+      : kind === 'recipe' ? 'レシピの材料が、在庫リストのどれに該当するか特定してください。'
+        : 'ユーザーが「買った」と言った品物が、買い物リストのどれを指すか特定してください。');
   lines.push('');
   lines.push(isStock ? '在庫リスト（行番号: 商品名（期限））' : '買い物リスト（行番号: 品名）');
   lines.push(rows.map(function (s) {
     return s.row + ': ' + s.name + (isStock ? '（' + s.date + '）' : '');
   }).join('\n'));
   lines.push('');
-  lines.push('ユーザーが言った品名:');
+  lines.push(kind === 'recipe' ? 'レシピの材料名:' : 'ユーザーが言った品名:');
   lines.push(names.map(function (n, i) { return (i + 1) + '. ' + n; }).join('\n'));
   lines.push('');
   lines.push('判断の指針:');
 
   if (isStock) {
-    lines.push('- 商品名は写真から読み取った正式名称です。ユーザーは略称・一般名・カテゴリ名で呼びます。');
+    lines.push(kind === 'recipe'
+      ? '- 商品名は写真から読み取った正式名称です。レシピの材料名は一般名・カテゴリ名で書かれています。'
+      : '- 商品名は写真から読み取った正式名称です。ユーザーは略称・一般名・カテゴリ名で呼びます。');
     lines.push('  例:「ヨーグルト」→「ダノンビオ」、「コーヒー」→「ネスカフェ ゴールドブレンド」');
   } else {
     lines.push('- リストの品名はユーザー自身が入れたものです。略称や一般名で呼ばれることがあります。');
@@ -1329,21 +1354,13 @@ function stockKeySet_(sh) {
   return keys;
 }
 
-/**
- * 「牛乳使った」等に対応して在庫を消す。
- * 同名が複数あるときは期限が近いものを1件だけ対象にする。
- */
-function consumeItems_(items) {
-  if (!items.length) return '対象の食材を読み取れませんでした。';
-
+/** 在庫（STATUS.STOCK）の行を {row, name, date, label} で返す */
+function currentStockRows_() {
   var sh = sheet_();
   var last = sh.getLastRow();
-  if (last < 2) return '在庫がまだありません。';
+  if (last < 2) return [];
 
   var data = sh.getRange(2, 1, last - 1, COL_COUNT).getValues();
-  var stamp = nowStamp_();
-
-  // 在庫だけを行番号つきで取り出す
   var stock = [];
   for (var i = 0; i < data.length; i++) {
     if (data[i][COL.STATUS - 1] !== STATUS.STOCK) continue;
@@ -1354,6 +1371,76 @@ function consumeItems_(items) {
       label: data[i][COL.LABEL - 1]
     });
   }
+  return stock;
+}
+
+/**
+ * レシピの材料が在庫にあるかどうかで「買うべきもの」「家にあるもの」に振り分ける。
+ * 数量は見ない（あるかないかだけ）。名前の突き合わせは第1段階を文字列一致、
+ * 見つからなかったものだけ第2段階として意味でClaudeに照合させる（matchListByClaude_ を流用）。
+ */
+function matchRecipeToStock_(items) {
+  var stock = currentStockRows_();
+  if (!stock.length) return formatRecipeResult_(items, []);
+
+  var have = [];
+  var unresolved = [];
+
+  items.forEach(function (it) {
+    var key = normalizeName_(it.item_name);
+    var hit = key && stock.some(function (s) {
+      var name = normalizeName_(s.name);
+      return name.indexOf(key) >= 0 || key.indexOf(name) >= 0;
+    });
+    if (hit) have.push(it); else unresolved.push(it);
+  });
+
+  if (unresolved.length) {
+    var matches = [];
+    try {
+      matches = matchListByClaude_(
+        unresolved.map(function (it) { return it.item_name; }), stock, 'recipe');
+    } catch (err) {
+      console.error('レシピの在庫照合に失敗: ' + err.stack);
+    }
+    var stillNeed = [];
+    unresolved.forEach(function (it) {
+      var hit = matches.some(function (m) { return m.said === it.item_name && m.row > 0; });
+      if (hit) have.push(it); else stillNeed.push(it);
+    });
+    unresolved = stillNeed;
+  }
+
+  return formatRecipeResult_(unresolved, have);
+}
+
+/** レシピ照合の結果を、買うべきもの／家にあるものの2つに分けて整形する */
+function formatRecipeResult_(need, have) {
+  function block(header, list) {
+    var lines = [header + '（' + list.length + '件）'];
+    if (!list.length) {
+      lines.push('なし');
+    } else {
+      list.forEach(function (it, i) {
+        lines.push((i + 1) + '. ' + it.item_name + (it.confidence === 'high' ? '' : ' ⚠'));
+      });
+    }
+    return lines.join('\n');
+  }
+
+  return block('■ 買うべきもの', need) + '\n\n' + block('■ 家にあるので買わなくてよいもの', have);
+}
+
+/**
+ * 「牛乳使った」等に対応して在庫を消す。
+ * 同名が複数あるときは期限が近いものを1件だけ対象にする。
+ */
+function consumeItems_(items) {
+  if (!items.length) return '対象の食材を読み取れませんでした。';
+
+  var sh = sheet_();
+  var stamp = nowStamp_();
+  var stock = currentStockRows_();
   if (!stock.length) return '在庫がありません。';
 
   // この一連のやり取りの状態。候補が複数あるものは queue に積んで質問する
