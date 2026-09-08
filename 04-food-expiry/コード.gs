@@ -1446,11 +1446,14 @@ function matchNamesToStock_(items) {
 }
 
 /** 在庫にある側の1行を「品名（期限・登録日）」の形にする */
-function withStockLine_(it) {
-  var detail = it.date
-    ? '（' + labelPrefix_(it.label) + it.date + ' 登録日' + (it.regDate || '不明') + '）'
-    : '';
-  return it.item_name + detail + (it.confidence && it.confidence !== 'high' ? ' ⚠' : '');
+function withStockLines_(it) {
+  var lines = [it.item_name + (it.confidence && it.confidence !== 'high' ? ' ⚠' : '')];
+  if (it.date) {
+    var label = (it.label === '賞味期限' || it.label === '消費期限') ? it.label : '賞味期限';
+    lines.push('　' + label + '：' + it.date);
+  }
+  lines.push('　登録日：' + (it.regDate || '不明'));
+  return lines.join('\n');
 }
 
 /** 在庫にない側の1行を「品名」の形にする（⚠は読み取り確度が低いときだけ） */
@@ -1458,26 +1461,36 @@ function missingLine_(it) {
   return it.item_name + (it.confidence && it.confidence !== 'high' ? ' ⚠' : '');
 }
 
+/** 0件のブロックは丸ごと省く。1件以上あるときだけ見出し＋一覧を返す */
 function resultBlock_(header, list, lineFn) {
+  if (!list.length) return null;
   var lines = [header + '（' + list.length + '件）'];
-  lines.push(list.length
-    ? list.map(function (it, i) { return (i + 1) + '. ' + lineFn(it); }).join('\n')
-    : 'なし');
+  list.forEach(function (it, i) {
+    lines.push((i + 1) + '. ' + lineFn(it));
+  });
   return lines.join('\n');
+}
+
+function joinBlocks_(blocks) {
+  return blocks.filter(function (b) { return b; }).join('\n\n') || '該当するものがありません。';
 }
 
 /** レシピの材料が在庫にあるかどうかで「買うべきもの」「家にあるもの」に振り分けて返信する */
 function matchRecipeToStock_(items) {
   var r = matchNamesToStock_(items);
-  return resultBlock_('■ 買うべきもの', r.missing, missingLine_) + '\n\n'
-    + resultBlock_('■ 家にあるので買わなくてよいもの', r.have, withStockLine_);
+  return joinBlocks_([
+    resultBlock_('■ 買うべきもの', r.missing, missingLine_),
+    resultBlock_('■ 家にあるので買わなくてよいもの', r.have, withStockLines_)
+  ]);
 }
 
 /** 在庫確認: 品名が在庫にあるかどうかを返信する */
 function checkStock_(items) {
   var r = matchNamesToStock_(items);
-  return resultBlock_('■ 在庫にあります', r.have, withStockLine_) + '\n\n'
-    + resultBlock_('■ 在庫にありません', r.missing, missingLine_);
+  return joinBlocks_([
+    resultBlock_('■ 在庫にあります', r.have, withStockLines_),
+    resultBlock_('■ 在庫にありません', r.missing, missingLine_)
+  ]);
 }
 
 /**
