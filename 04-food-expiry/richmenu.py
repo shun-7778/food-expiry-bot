@@ -15,7 +15,6 @@ BLUE_DARK  = (32, 56, 92)
 ORANGE     = (224, 122, 62)    # #E07A3E アクセント
 GRAY       = (92, 99, 105)     # 取消。在庫にも買い物リストにも属さないので中間色
 GRAY_DARK  = (66, 72, 77)
-RED        = (166, 62, 56)     # 全削除。戻せるが影響が大きいので警告色
 WHITE      = (255, 255, 255)
 LINE       = (255, 255, 255)
 
@@ -81,6 +80,21 @@ def icon_camera(cx, cy, s, fg, bg):
     d.ellipse([lcx - r2, lcy - r2, lcx + r2, lcy + r2], fill=fg)
 
 
+def icon_fridge(cx, cy, s, fg, bg):
+    """冷蔵庫＝在庫確認"""
+    w, h = s * 0.76, s * 1.04
+    x0, y0 = cx - w / 2, cy - h / 2
+    d.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=s * 0.10, fill=fg)
+    # 上下の扉を分ける線
+    dy = y0 + h * 0.36
+    d.rectangle([x0, dy - s * 0.028, x0 + w, dy + s * 0.028], fill=bg)
+    # 取っ手
+    for ty in (dy - h * 0.20, dy + h * 0.10):
+        d.rounded_rectangle([x0 + w * 0.72 - s * 0.032, ty,
+                             x0 + w * 0.72 + s * 0.032, ty + h * 0.16],
+                            radius=s * 0.032, fill=bg)
+
+
 def icon_list(cx, cy, s, fg, bg, mark=None):
     """リスト。mark で + / - / なし"""
     w, h = s * 0.88, s
@@ -120,40 +134,38 @@ def icon_undo(cx, cy, s, fg, bg):
                (px + a * 0.55, py + a * 0.70)], fill=fg)
 
 
-def icon_clear(cx, cy, s, fg, bg):
-    """リストに × ＝買い物リストの全削除"""
-    icon_list(cx, cy, s, fg, bg)
-    w, h = s * 0.88, s
-    bx, by, br = cx + w * 0.46, cy + h * 0.42, s * 0.26
-    d.ellipse([bx - br, by - br, bx + br, by + br], fill=WHITE)
-    d.ellipse([bx - br * 0.84, by - br * 0.84, bx + br * 0.84, by + br * 0.84], fill=bg)
-    t = br * 0.15
-    for a, b in (((-1, -1), (1, 1)), ((-1, 1), (1, -1))):
-        d.line([(bx + a[0] * br * 0.36, by + a[1] * br * 0.36),
-                (bx + b[0] * br * 0.36, by + b[1] * br * 0.36)],
-               fill=WHITE, width=int(t * 2.4))
-
-
 # ---------------------------------------------------------------- 配置
+#
+# 下段の3列目（買い物リスト削除／全削除）だけ高さを半分にして2つ積む。
+# それ以外は今までどおり列1つ＝ボタン1つ。
 
-CELLS = [
-    # (col, row, 見出し, 2行目, アイコン, 背景, 前景)
-    (0, 0, "期限登録", None,       icon_calendar, GREEN, GREEN_DARK),
-    (1, 0, "使用済",   None,       icon_check,    GREEN, GREEN_DARK),
-    (2, 0, "材料確認", None,       icon_camera,   GREEN, GREEN_DARK),
-    # 取消は在庫にも買い物リストにも効くので、どちらの色にも寄せない。
-    # 真下の「全削除」を押し間違えたときに、指を動かさず戻せる位置でもある
-    (3, 0, "取消",     None,       icon_undo,     GRAY,  GRAY_DARK),
-    (0, 1, "買い物リスト", "追加",  lambda *a: icon_list(*a, mark="+"), BLUE, BLUE_DARK),
-    (1, 1, "買い物リスト", "削除",  lambda *a: icon_list(*a, mark="-"), BLUE, BLUE_DARK),
-    (2, 1, "買い物リスト", "表示",  icon_list,                          BLUE, BLUE_DARK),
-    # 全削除は取消で戻せるが影響が大きいので、押す前に気づけるよう色を変える
-    (3, 1, "買い物リスト", "全削除", icon_clear,                        RED,  BLUE_DARK),
+TOP_Y, TOP_H = ROWS[0]
+BOT_Y, BOT_H = ROWS[1]
+# LINE の bounds は整数座標が必須。843は奇数なので均等に割れず、421/422に分ける
+HALF_H = BOT_H // 2
+HALF_H2 = BOT_H - HALF_H
+
+ICON_CELLS = [
+    # (col, y, h, 見出し, 2行目, アイコン, 背景, 前景)
+    (0, TOP_Y, TOP_H, "期限登録", None,      icon_calendar, GREEN, GREEN_DARK),
+    (1, TOP_Y, TOP_H, "使用済",   None,      icon_check,    GREEN, GREEN_DARK),
+    (2, TOP_Y, TOP_H, "在庫確認", None,      icon_fridge,   GREEN, GREEN_DARK),
+    (3, TOP_Y, TOP_H, "材料確認", None,      icon_camera,   GREEN, GREEN_DARK),
+    (0, BOT_Y, BOT_H, "買い物リスト", "追加", lambda *a: icon_list(*a, mark="+"), BLUE, BLUE_DARK),
+    (1, BOT_Y, BOT_H, "買い物リスト", "表示", icon_list,                          BLUE, BLUE_DARK),
+    # 取消は在庫にも買い物リストにも効くので、どちらの色にも寄せない
+    (3, BOT_Y, BOT_H, "取消",     None,      icon_undo,     GRAY,  GRAY_DARK),
 ]
 
-for col, row, title, sub, icon, bg, fg in CELLS:
+# 文字だけのボタン（アイコンなし）。削除／全削除は上下に積むので、
+# 押し間違えても取消で戻せる前提で同じ配色にしている
+TEXT_CELLS = [
+    (2, BOT_Y,            HALF_H,  "買い物リスト削除", BLUE),
+    (2, BOT_Y + HALF_H,   HALF_H2, "買い物リスト全削除", BLUE),
+]
+
+for col, y, h, title, sub, icon, bg, fg in ICON_CELLS:
     x, w = COLS[col]
-    y, h = ROWS[row]
     d.rectangle([x, y, x + w, y + h], fill=bg)
     icon(x + w / 2, y + h * 0.36, h * 0.30, WHITE, bg)
     if sub:
@@ -162,10 +174,18 @@ for col, row, title, sub, icon, bg, fg in CELLS:
     else:
         center(x + w / 2, y + h * 0.76, title, label_font, WHITE)
 
+for col, y, h, title, bg in TEXT_CELLS:
+    x, w = COLS[col]
+    d.rectangle([x, y, x + w, y + h], fill=bg)
+    center(x + w / 2, y + h / 2, title, label_font, WHITE)
+
 # 区切り線
 for x, w in COLS[1:]:
     d.rectangle([x - 4, 0, x + 4, H], fill=LINE)
 d.rectangle([0, ROWS[1][0] - 4, W, ROWS[1][0] + 4], fill=LINE)
+# 削除／全削除の間の横線
+split_x, split_w = COLS[2]
+d.rectangle([split_x, BOT_Y + HALF_H - 4, split_x + split_w, BOT_Y + HALF_H + 4], fill=LINE)
 
 # ---------------------------------------------------------------- 出力
 

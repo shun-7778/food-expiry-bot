@@ -208,6 +208,7 @@ var HELP_MESSAGE = [
   '　使用済 牛乳',
   '　買い物リスト追加 牛乳と卵',
   '　買い物リスト削除 牛乳',
+  '　在庫確認 醤油、みりん',
   '種別が確定するので、取り違えが起きません。',
   'これまでどおり接頭辞なしでも送れます。',
   '',
@@ -221,10 +222,14 @@ var HELP_MESSAGE = [
   '同じものが在庫にあると確認します。まとめ買いは',
   '「牛乳を2個 9月11日」と個数を言えば確認しません。',
   '',
+  '■ 在庫確認',
+  '「在庫確認 醤油、みりん」のように送ると、それぞれ',
+  '在庫にあるかどうかを期限・登録日つきで返します。',
+  '',
   '■ レシピ照合',
   'レシピの写真を送ると、材料を在庫と突き合わせて',
-  '「買うべきもの」「家にあるもの」を返します。',
-  '複数枚まとめて送ると1回の照合にまとめます。',
+  '「買うべきもの」「家にあるもの」を期限・登録日つきで',
+  '返します。複数枚まとめて送ると1回の照合にまとめます。',
   '',
   '■ 使ったとき',
   '「牛乳使った」「ヨーグルト食べた」「豆腐捨てた」',
@@ -276,6 +281,7 @@ var COMMAND_WORDS = {
   '破棄済': 'consume',
   '捨てた': 'consume',
   '破棄': 'consume',
+  '在庫確認': 'stock_check',
   '買い物リスト追加': 'shop_add',
   '買い物追加': 'shop_add',
   '買い物リスト削除': 'shop_bought',
@@ -287,6 +293,7 @@ var COMMAND_WORDS = {
 var COMMAND_HINTS = {
   register: '「期限登録 牛乳 9月10日」のように、食材名と期限を続けて送ってください。',
   consume: '「使用済 牛乳」のように、使った食材名を続けて送ってください。',
+  stock_check: '「在庫確認 醤油、みりん」のように、確認したい食材名を続けて送ってください。',
   shop_add: '「買い物リスト追加 牛乳と卵」のように、買うものを続けて送ってください。',
   shop_bought: '「買い物リスト削除 牛乳」のように、買ってきたものを続けて送ってください。'
 };
@@ -326,6 +333,14 @@ function runConsumeCommand_(text) {
   }));
 }
 
+/** 品名を Claude に特定させ、在庫にあるかどうかを返す */
+function runStockCheckCommand_(text) {
+  var items = parseItemNames_(text);
+  if (!items.length) return '品名を読み取れませんでした。';
+
+  return checkStock_(items.map(function (it) { return { item_name: it.name }; }));
+}
+
 /**
  * 接頭辞で種別が確定した入力を処理する。
  * 種別は押されたボタンで決まっているので、品名の特定だけを Claude に任せる。
@@ -338,6 +353,9 @@ function runCommand_(cmd) {
   }
   if (cmd.action === 'consume') {
     return runConsumeCommand_(cmd.rest);
+  }
+  if (cmd.action === 'stock_check') {
+    return runStockCheckCommand_(cmd.rest);
   }
 
   var result = parseTextExpiry_(cmd.rest);
@@ -1366,69 +1384,100 @@ function currentStockRows_() {
       row: i + 2,
       name: data[i][COL.NAME - 1],
       date: normalizeYmd_(data[i][COL.DATE - 1]),
-      label: data[i][COL.LABEL - 1]
+      label: data[i][COL.LABEL - 1],
+      regDate: normalizeYmd_(data[i][COL.REG_DATE - 1])
     });
   }
   return stock;
 }
 
+/** 一致した在庫行の期限・登録日を、元のアイテムに付け足す */
+function withStockInfo_(it, stockRow) {
+  return {
+    item_name: it.item_name,
+    confidence: it.confidence,
+    date: stockRow.date,
+    label: stockRow.label,
+    regDate: stockRow.regDate
+  };
+}
+
 /**
- * レシピの材料が在庫にあるかどうかで「買うべきもの」「家にあるもの」に振り分ける。
- * 数量は見ない（あるかないかだけ）。名前の突き合わせは第1段階を完全一致のみとし、
- * それ以外は全部第2段階の意味照合（matchListByClaude_）に回す。
+ * 品名リストが在庫にあるかどうかで {have, missing} に振り分ける。
+ * have には一致した在庫行の期限・登録日を付ける。数量は見ない（あるかないかだけ）。
  *
- * 消費・買い物リストの突き合わせと違い、ここは部分一致（indexOf）を使わない。
- * 「ごま」が「ごま油」に含まれるからといって同じ食材とは限らず、部分一致だと
- * 別物を誤って「在庫にある」と判定してしまう。Claude の意味照合には元々
- * 「似ているだけの別物で代用しない」という指示が入っているため、そちらに任せる。
+ * 名前の突き合わせは第1段階を完全一致のみとし、それ以外は全部第2段階の
+ * 意味照合（matchListByClaude_）に回す。消費・買い物リストの突き合わせと違い、
+ * ここは部分一致（indexOf）を使わない。「ごま」が「ごま油」に含まれるからと
+ * いって同じ食材とは限らず、部分一致だと別物を誤って「ある」と判定してしまう。
+ * Claude の意味照合には元々「似ているだけの別物で代用しない」という指示が
+ * 入っているため、そちらに任せる。レシピ照合・在庫確認の両方から使う。
  */
-function matchRecipeToStock_(items) {
+function matchNamesToStock_(items) {
   var stock = currentStockRows_();
-  if (!stock.length) return formatRecipeResult_(items, []);
+  if (!stock.length) return { have: [], missing: items };
 
   var have = [];
   var unresolved = [];
 
   items.forEach(function (it) {
     var key = normalizeName_(it.item_name);
-    var hit = key && stock.some(function (s) { return normalizeName_(s.name) === key; });
-    if (hit) have.push(it); else unresolved.push(it);
+    var hit = key && stock.filter(function (s) { return normalizeName_(s.name) === key; })[0];
+    if (hit) have.push(withStockInfo_(it, hit)); else unresolved.push(it);
   });
 
+  var missing = [];
   if (unresolved.length) {
     var matches = [];
     try {
       matches = matchListByClaude_(
         unresolved.map(function (it) { return it.item_name; }), stock, 'recipe');
     } catch (err) {
-      console.error('レシピの在庫照合に失敗: ' + err.stack);
+      console.error('在庫の意味照合に失敗: ' + err.stack);
     }
-    var stillNeed = [];
     unresolved.forEach(function (it) {
-      var hit = matches.some(function (m) { return m.said === it.item_name && m.row > 0; });
-      if (hit) have.push(it); else stillNeed.push(it);
+      var m = matches.filter(function (mm) { return mm.said === it.item_name && mm.row > 0; })[0];
+      var row = m && stock.filter(function (s) { return s.row === m.row; })[0];
+      if (row) have.push(withStockInfo_(it, row)); else missing.push(it);
     });
-    unresolved = stillNeed;
   }
 
-  return formatRecipeResult_(unresolved, have);
+  return { have: have, missing: missing };
 }
 
-/** レシピ照合の結果を、買うべきもの／家にあるものの2つに分けて整形する */
-function formatRecipeResult_(need, have) {
-  function block(header, list) {
-    var lines = [header + '（' + list.length + '件）'];
-    if (!list.length) {
-      lines.push('なし');
-    } else {
-      list.forEach(function (it, i) {
-        lines.push((i + 1) + '. ' + it.item_name + (it.confidence === 'high' ? '' : ' ⚠'));
-      });
-    }
-    return lines.join('\n');
-  }
+/** 在庫にある側の1行を「品名（期限・登録日）」の形にする */
+function withStockLine_(it) {
+  var detail = it.date
+    ? '（' + labelPrefix_(it.label) + it.date + ' 登録日' + (it.regDate || '不明') + '）'
+    : '';
+  return it.item_name + detail + (it.confidence && it.confidence !== 'high' ? ' ⚠' : '');
+}
 
-  return block('■ 買うべきもの', need) + '\n\n' + block('■ 家にあるので買わなくてよいもの', have);
+/** 在庫にない側の1行を「品名」の形にする（⚠は読み取り確度が低いときだけ） */
+function missingLine_(it) {
+  return it.item_name + (it.confidence && it.confidence !== 'high' ? ' ⚠' : '');
+}
+
+function resultBlock_(header, list, lineFn) {
+  var lines = [header + '（' + list.length + '件）'];
+  lines.push(list.length
+    ? list.map(function (it, i) { return (i + 1) + '. ' + lineFn(it); }).join('\n')
+    : 'なし');
+  return lines.join('\n');
+}
+
+/** レシピの材料が在庫にあるかどうかで「買うべきもの」「家にあるもの」に振り分けて返信する */
+function matchRecipeToStock_(items) {
+  var r = matchNamesToStock_(items);
+  return resultBlock_('■ 買うべきもの', r.missing, missingLine_) + '\n\n'
+    + resultBlock_('■ 家にあるので買わなくてよいもの', r.have, withStockLine_);
+}
+
+/** 在庫確認: 品名が在庫にあるかどうかを返信する */
+function checkStock_(items) {
+  var r = matchNamesToStock_(items);
+  return resultBlock_('■ 在庫にあります', r.have, withStockLine_) + '\n\n'
+    + resultBlock_('■ 在庫にありません', r.missing, missingLine_);
 }
 
 /**
@@ -2141,29 +2190,35 @@ function shopList_() {
  */
 var RICHMENU_SIZE = { width: 2500, height: 1686 };
 
-// richmenu.png の格子と一致させること。列幅の合計は width と同じでなければならない
-var RICHMENU_COLS = [
-  { x: 0, w: 625 }, { x: 625, w: 625 }, { x: 1250, w: 625 }, { x: 1875, w: 625 }
-];
-var RICHMENU_ROWS = [{ y: 0, h: 843 }, { y: 843, h: 843 }];
+// richmenu.png の格子と一致させること。境界の並びは列0の左端→列4の右端
+var RICHMENU_COLS = [0, 625, 1250, 1875, 2500];
+var RICHMENU_TOP_Y = 0, RICHMENU_TOP_H = 843;
+var RICHMENU_BOT_Y = 843, RICHMENU_BOT_H = 843;
+// LINE の bounds は整数座標が必須。843は奇数なので均等に割れず、421/422に分ける
+var RICHMENU_HALF_H = Math.floor(RICHMENU_BOT_H / 2);
+var RICHMENU_HALF_H2 = RICHMENU_BOT_H - RICHMENU_HALF_H;
 
 /**
- * 画像と同じ並び（左上から右へ、上段→下段）。
+ * 画像と同じ並び（左上から右へ、上段→下段）。下段の3列目（買い物リスト
+ * 削除／全削除）だけ高さを半分にして2つ積んでいるので、行・高さを
+ * セルごとに明示する（列番号からの自動計算はできない）。
+ *   col        … 列番号（0始まり）。幅は RICHMENU_COLS から決まる
+ *   y, h       … そのセルのY座標と高さ
  *   fill       … 押すと入力欄に差し込まれる。続きを打って自分で送る
  *   send       … 押すとそのまま送信される。続けて入力するものがない操作に使う
  *   cameraRoll … 押すと写真選択画面が開く（レシピ写真を選んで送る用）
  */
 var RICHMENU_CELLS = [
-  { fill: '期限登録\n' },
-  { fill: '使用済\n' },
-  { cameraRoll: true }, // 材料確認: 開いた選択画面から選んだ写真がそのまま届く
-  // 真下の「全削除」を押し間違えたときに、指を動かさず戻せる位置に置く
-  { send: '取消' },
-  { fill: '買い物リスト追加\n' },
-  { fill: '買い物リスト削除\n' },
-  { send: '買い物リスト' },
+  { col: 0, y: RICHMENU_TOP_Y, h: RICHMENU_TOP_H, fill: '期限登録\n' },
+  { col: 1, y: RICHMENU_TOP_Y, h: RICHMENU_TOP_H, fill: '使用済\n' },
+  { col: 2, y: RICHMENU_TOP_Y, h: RICHMENU_TOP_H, fill: '在庫確認\n' },
+  { col: 3, y: RICHMENU_TOP_Y, h: RICHMENU_TOP_H, cameraRoll: true }, // 材料確認
+  { col: 0, y: RICHMENU_BOT_Y, h: RICHMENU_BOT_H, fill: '買い物リスト追加\n' },
+  { col: 1, y: RICHMENU_BOT_Y, h: RICHMENU_BOT_H, send: '買い物リスト' },
+  { col: 2, y: RICHMENU_BOT_Y, h: RICHMENU_HALF_H, fill: '買い物リスト削除\n' },
   // 全削除は行を消さず「購入済」にするだけなので、押し間違えても「取消」で戻せる
-  { send: '買い物リストを全部削除' }
+  { col: 2, y: RICHMENU_BOT_Y + RICHMENU_HALF_H, h: RICHMENU_HALF_H2, send: '買い物リストを全部削除' },
+  { col: 3, y: RICHMENU_BOT_Y, h: RICHMENU_BOT_H, send: '取消' }
 ];
 
 function buildRichMenu_() {
@@ -2172,11 +2227,10 @@ function buildRichMenu_() {
     selected: true,          // 友だち追加時から開いた状態にする
     name: '食材在庫メニュー',
     chatBarText: 'メニュー',
-    areas: RICHMENU_CELLS.map(function (cell, i) {
-      var c = RICHMENU_COLS[i % RICHMENU_COLS.length];
-      var r = RICHMENU_ROWS[Math.floor(i / RICHMENU_COLS.length)];
+    areas: RICHMENU_CELLS.map(function (cell) {
+      var x0 = RICHMENU_COLS[cell.col], x1 = RICHMENU_COLS[cell.col + 1];
       return {
-        bounds: { x: c.x, y: r.y, width: c.w, height: r.h },
+        bounds: { x: x0, y: cell.y, width: x1 - x0, height: cell.h },
         action: cell.send
           ? { type: 'message', text: cell.send }
           : cell.cameraRoll
