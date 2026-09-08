@@ -157,11 +157,13 @@ ICON_CELLS = [
     (3, BOT_Y, BOT_H, "取消",     None,      icon_undo,     GRAY,  GRAY_DARK),
 ]
 
-# 文字だけのボタン（アイコンなし）。削除／全削除は上下に積むので、
-# 押し間違えても取消で戻せる前提で同じ配色にしている
+# 文字だけのボタン（アイコンなし）。「買い物リスト」の1行だけだと
+# 幅625pxに収まらず隣の列にはみ出すので、他のボタンと同じく
+# 「買い物リスト」＋「削除」/「全削除」の2行に分ける。削除／全削除は
+# 上下に積むので、押し間違えても取消で戻せる前提で同じ配色にしている
 TEXT_CELLS = [
-    (2, BOT_Y,            HALF_H,  "買い物リスト削除", BLUE),
-    (2, BOT_Y + HALF_H,   HALF_H2, "買い物リスト全削除", BLUE),
+    (2, BOT_Y,            HALF_H,  "削除",   BLUE),
+    (2, BOT_Y + HALF_H,   HALF_H2, "全削除", BLUE),
 ]
 
 for col, y, h, title, sub, icon, bg, fg in ICON_CELLS:
@@ -174,10 +176,11 @@ for col, y, h, title, sub, icon, bg, fg in ICON_CELLS:
     else:
         center(x + w / 2, y + h * 0.76, title, label_font, WHITE)
 
-for col, y, h, title, bg in TEXT_CELLS:
+for col, y, h, sub, bg in TEXT_CELLS:
     x, w = COLS[col]
     d.rectangle([x, y, x + w, y + h], fill=bg)
-    center(x + w / 2, y + h / 2, title, label_font, WHITE)
+    center(x + w / 2, y + h * 0.40, "買い物リスト", sub_font, WHITE)
+    center(x + w / 2, y + h * 0.66, sub, label_font, WHITE)
 
 # 区切り線
 for x, w in COLS[1:]:
