@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#ffffff">
+<title>食材管理</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #f4f5f7; }
+  iframe { border: 0; width: 100%; height: 100%; display: block; }
+  p { font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+      color: #555; padding: 24px; font-size: 15px; }
+</style>
+</head>
+<body>
+<script>
+// 買い物リスト／在庫の画面（Google Apps Script）を、そのまま枠として表示するだけのページ。
+// Apps Script を直接開くと Google の注意バーが上に出るので、それを避けるために挟んでいる。
+//
+// 表示先とトークンは URL のパラメータで受け取る（このページ自体には何も持たせない）:
+//   ?u=<Apps Script の /exec URL を encodeURIComponent したもの>&k=<トークン>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var url = q.get('u') || '';
+  var key = q.get('k') || '';
+
+  // 差し込み先は Apps Script の URL に限る（別のサイトを埋め込まされないように）
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url) || !key) {
+    document.write('<p>リンクが正しくありません。LINE で「リンク」と送って開き直してください。</p>');
+    return;
+  }
+
+  var frame = document.createElement('iframe');
+  frame.src = url + '?k=' + encodeURIComponent(key);
+  frame.setAttribute('allow', 'clipboard-write');
+  document.body.appendChild(frame);
+})();
+</script>
+</body>
+</html>
