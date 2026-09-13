@@ -28,6 +28,9 @@
   var key = q.get('k') || '';
   // 知らない値を素通しせず、決め打ちの2つだけを中へ渡す
   var tab = q.get('tab') === 'stock' ? 'stock' : 'shop';
+  // 開いた人の呼び名。リッチメニューは人ごとに作ってあるので、そこから開くと付いてくる。
+  // 中の画面が「誰が足したか」を残すのに使う。知らない名前は中で弾かれる
+  var who = (q.get('p') || '').slice(0, 20);
 
   // 差し込み先は Apps Script の URL に限る（別のサイトを埋め込まされないように）
   if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url) || !key) {
@@ -36,7 +39,8 @@
   }
 
   var frame = document.createElement('iframe');
-  frame.src = url + '?k=' + encodeURIComponent(key) + '&tab=' + tab;
+  frame.src = url + '?k=' + encodeURIComponent(key) + '&tab=' + tab
+    + (who ? '&p=' + encodeURIComponent(who) : '');
   frame.setAttribute('allow', 'clipboard-write');
   document.body.appendChild(frame);
 })();
